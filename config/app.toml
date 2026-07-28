@@ -1,0 +1,12 @@
+[app]
+name = "乐小读"
+
+[toolbar]
+width = 360
+height = 52
+top_margin = 24
+
+[capture]
+width = 480
+height = 270
+output_dir = "artifacts"

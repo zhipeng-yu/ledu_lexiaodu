@@ -1,0 +1,27 @@
+# Project-local Python environment
+.venv/
+
+# Python caches and test/build output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Local settings and secrets
+.env
+.env.*
+!.env.example
+
+# Runtime artifacts (screenshots, logs)
+artifacts/
+*.log
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
