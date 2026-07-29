@@ -11,6 +11,12 @@ from typing import Any, Protocol
 from PySide6.QtGui import QImage
 
 
+MIN_TEXT_CONFIDENCE = 0.90
+EDGE_EXCLUSION_RATIO = 0.035
+CENTER_EXCLUSION_MIN_RATIO = 0.40
+CENTER_EXCLUSION_MAX_RATIO = 0.60
+
+
 class OcrError(RuntimeError):
     """Raised when OCR cannot produce usable text results."""
 
@@ -63,6 +69,28 @@ def infer_speaker(box: TextBox, image_width: int) -> Speaker:
     if box.center_x < image_width / 2:
         return Speaker.PARENT
     return Speaker.ADVISOR
+
+
+def _is_chat_message(
+    box: TextBox,
+    image_width: int,
+    confidence: float | None,
+) -> bool:
+    if image_width <= 0:
+        raise ValueError("图像宽度必须为正整数")
+    if confidence is not None and confidence < MIN_TEXT_CONFIDENCE:
+        return False
+
+    edge_width = image_width * EDGE_EXCLUSION_RATIO
+    if box.right <= edge_width or box.left >= image_width - edge_width:
+        return False
+
+    center_ratio = box.center_x / image_width
+    return not (
+        CENTER_EXCLUSION_MIN_RATIO
+        <= center_ratio
+        <= CENTER_EXCLUSION_MAX_RATIO
+    )
 
 
 def _result_payload(result: Any) -> Mapping[str, Any]:
@@ -127,6 +155,8 @@ def lines_from_paddle_results(
             confidence = (
                 float(scores[index]) if index < len(scores) else None
             )
+            if not _is_chat_message(box, image_width, confidence):
+                continue
             lines.append(
                 TranscriptLine(
                     speaker=infer_speaker(box, image_width),
@@ -195,7 +225,7 @@ class PaddleOcrEngine:
                 use_doc_orientation_classify=False,
                 use_doc_unwarping=False,
                 use_textline_orientation=False,
-                text_rec_score_thresh=0.5,
+                text_rec_score_thresh=MIN_TEXT_CONFIDENCE,
             )
         except Exception as exc:
             raise OcrUnavailableError(f"本地 OCR 模型不可用: {exc}") from exc
