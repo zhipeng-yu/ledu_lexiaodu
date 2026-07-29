@@ -1,50 +1,62 @@
-# 乐小读 Day 1 Handoff
+# 乐小读 Day 2 Handoff
 
-更新时间：2026-07-28
+更新时间：2026-07-29
+
+## 开始门槛
+
+- 开始前确认 `HEAD` 与 `origin/main` 均为 Day 1 最新提交 `78832d7`（`feat: bootstrap Day 1 MVP`）。
+- Day 1 基线测试为 8 tests passed；工作区开始时无未提交改动。
 
 ## 完成范围
 
-- 初始化 `main` 分支 Git 仓库，并配置 Python、测试、构建、编辑器和运行产物忽略规则。
-- 创建项目内 `.venv`，实际版本为 Python 3.11.15；未修改或安装依赖到 Conda base。
-- 建立 `src/lexiaodu` 模块化骨架，以及 TOML 配置、领域数据结构和两篇虚构中文演示资料。
-- 实现 PySide6 无边框、可拖动、置顶悬浮工具条，提供“截图验证”和“关闭”两个最小操作。
-- 通过 `ScreenCapture` 协议隔离截图接口，实现 Qt 单屏区域截图适配器；跨屏区域会明确报错。
-- 提供模块入口、控制台脚本入口、截图烟测参数和基础测试。
+- 将悬浮工具的操作改为“框选截图”，新增覆盖虚拟桌面的半透明拖框选择层，支持 `Esc` 取消。
+- 将截图协议改为只返回内存中的 `QImage`；删除截图目录创建、PNG 保存和输出路径字段。
+- 接入本地 PaddleOCR 3.x CPU 推理，直接把 `QImage` 转换为 BGR `numpy.ndarray`，不经过临时图片文件。
+- 固定使用轻量的 `PP-OCRv5_mobile_det` 和 `PP-OCRv5_mobile_rec` 模型，识别置信度阈值为 0.5。
+- 根据文字框中心位置做角色初判：画面左半边为“家长”，右半边（含中线）为“顾问”。
+- 新增 OCR 校正窗口，可逐条修改文字和发言人、删除或添加发言，并显示 OCR 置信度。
+- OCR 依赖缺失、模型不可用、推理失败或没有识别结果时，均打开校正窗口并提供手动粘贴文字、指定家长/顾问的兜底。
+- 新增选区、内存截图结构、OCR 结果解析、角色判定、图像转换、校正 UI 和端到端控制器测试。
 
 ## 主要文件
 
-- `pyproject.toml`：Python 版本、运行/开发依赖、入口和 pytest 配置。
-- `config/app.toml`：工具条尺寸、位置边距和截图区域配置。
-- `demo/reading_materials.json`：仅用于开发的虚构演示资料。
-- `src/lexiaodu/domain.py`：`ScreenRegion`、`ReadingMaterial` 及居中区域计算。
-- `src/lexiaodu/config.py`：基于 Python 3.11 `tomllib` 的类型化配置加载。
-- `src/lexiaodu/capture.py`：截图协议、结果结构和 PySide6 单屏实现。
-- `src/lexiaodu/toolbar.py`：最简置顶悬浮工具条。
-- `src/lexiaodu/app.py`：应用装配、运行入口和截图烟测入口。
-- `tests/`：领域、配置、演示数据、截图边界和工具条窗口标志测试。
+- `src/lexiaodu/selection.py`：虚拟桌面拖框层和选区坐标归一化。
+- `src/lexiaodu/capture.py`：只返回内存 `QImage` 的单屏截图协议与 Qt 实现。
+- `src/lexiaodu/ocr.py`：PaddleOCR 延迟加载、`QImage` 到 BGR 数组转换、结果解析和角色初判。
+- `src/lexiaodu/editor.py`：OCR 文字/发言人校正及手动粘贴界面。
+- `src/lexiaodu/workflow.py`：串联悬浮工具、选区、截图、OCR 和校正窗口的控制器。
+- `src/lexiaodu/app.py`：Day 2 应用装配及纯内存截图烟测入口。
+- `config/app.toml`：PaddleX 模型缓存目录，默认 `E:/DevCaches/paddlex`。
+- `pyproject.toml`：可选 `ocr` 依赖组，固定 PaddleOCR 3.3.2 / PaddlePaddle 3.2.2。
+- `tests/`：Day 1 测试及 Day 2 单元、UI、集成测试。
 
 ## 验证结果
 
 - `.\.venv\python.exe --version`：Python 3.11.15。
-- `.\.venv\python.exe -m pytest`：8 tests passed。
+- `.\.venv\python.exe -m pytest`：22 tests passed。
 - `.\.venv\python.exe -m compileall -q src tests`：通过。
-- `.\.venv\python.exe -m pip check`：无依赖冲突。
-- `.\.venv\python.exe -m lexiaodu --capture-smoke artifacts\day1-smoke.png`：通过。
-  - 主屏：`B160QAN02.7`
-  - 请求区域：480 × 270 Qt 逻辑像素
-  - 输出图像：720 × 405 物理像素（屏幕缩放 150%）
-  - 已检查图像内容非空；文件保留在本地并由 Git 忽略。
+- `.\.venv\python.exe -m pip check`：No broken requirements found。
+- PaddleOCR 模型级内存烟测：
+  - PaddlePaddle 3.2.2、PaddleOCR 3.3.2。
+  - 模型从 `E:\DevCaches\paddlex\official_models` 加载。
+  - 从内存像素识别出 `PARENT HELLO`（0.984）和 `ADVISOR WELCOME`（0.987）。
+  - 未创建输入、截图或 OCR 结果文件。
+- `.\.venv\python.exe -m lexiaodu --capture-smoke`：通过；主屏
+  `B160QAN02.7`，内存图像 720 × 405 物理像素，未生成图片文件。
 
-## 已知问题与 Day 1 边界
+## 已知问题与 Day 2 边界
 
-- 目前只支持 Windows 上由 Qt 提供的单屏截图；不支持跨屏拼接。
-- 当前截图区域由配置固定为主屏中央区域，没有交互式框选、预览或历史记录。
-- OCR、内容识别、阅读过程和反馈功能均未实现，留待 Day 2–5。
-- 受限沙箱会阻止桌面采集并产生黑图；真实截图烟测需要在可访问交互桌面的会话中运行。
-- 工具条窗口标志和构造已自动测试，但尚未覆盖不同 Windows 缩放率和多显示器排列的人工 UI 回归。
+- 角色判断只是左右位置启发式；不同聊天软件或左右身份相反时需要人工校正。
+- 仍只支持完整落在单个屏幕内的框选区域；跨屏框选会明确报错。
+- OCR 初始化和推理当前在 GUI 主线程执行，首次模型加载期间界面可能暂时无响应。
+- 首次 OCR 需要联网下载模型；缓存完成后可从本地模型运行。
+- PaddlePaddle 3.2 在 Windows 导入时会创建 `%USERPROFILE%\.cache\paddle\dataset` 小目录；模型权重已放在 E 盘缓存。
+- 截图和校正后的文本都未持久化；校正结果尚未进入 Day 3 的后续处理。
+- 受限桌面会话可能让真实屏幕采集得到黑图；纯函数、UI 结构和工作流已自动测试。
 
 ## 后续可复用接口
 
-- 后续截图来源可实现 `lexiaodu.capture.ScreenCapture`，无需修改调用方。
-- 捕获请求使用逻辑桌面坐标 `ScreenRegion`，当前适配器负责转换为屏幕本地坐标。
-- 阅读资料以 `ReadingMaterial` 表示，演示 JSON 通过 `load_demo_materials` 进入领域层。
+- 截图来源继续实现 `lexiaodu.capture.ScreenCapture`，输入 `ScreenRegion`，输出包含内存 `QImage` 的 `CaptureResult`。
+- OCR 来源可实现 `lexiaodu.ocr.OcrEngine`，输出 `TranscriptLine` 列表，无需修改工作流。
+- `TranscriptEditor.transcript()` 可取得人工校正后的发言列表，供 Day 3 接续处理。
+- `Speaker.PARENT` / `Speaker.ADVISOR` 是统一的家长/顾问标识。

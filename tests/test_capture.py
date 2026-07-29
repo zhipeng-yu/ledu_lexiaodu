@@ -1,6 +1,7 @@
 import pytest
+from PySide6.QtGui import QImage
 
-from lexiaodu.capture import CaptureError, local_region
+from lexiaodu.capture import CaptureError, CaptureResult, local_region
 from lexiaodu.domain import ScreenRegion
 
 
@@ -19,3 +20,16 @@ def test_reject_region_crossing_screen_boundary() -> None:
 
     with pytest.raises(CaptureError, match="同一个屏幕"):
         local_region(crossing, screen)
+
+
+def test_capture_result_contains_only_in_memory_image() -> None:
+    image = QImage(320, 180, QImage.Format.Format_RGB32)
+    result = CaptureResult(
+        image=image,
+        region=ScreenRegion(x=10, y=20, width=320, height=180),
+        screen_name="test-screen",
+    )
+
+    assert result.pixel_width == 320
+    assert result.pixel_height == 180
+    assert not hasattr(result, "output_path")

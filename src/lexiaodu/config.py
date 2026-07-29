@@ -21,7 +21,11 @@ class ToolbarSettings:
 class CaptureSettings:
     width: int = 480
     height: int = 270
-    output_dir: Path = Path("artifacts")
+
+
+@dataclass(frozen=True, slots=True)
+class OcrSettings:
+    model_cache_dir: Path = Path("E:/DevCaches/paddlex")
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +33,7 @@ class AppSettings:
     app_name: str = "乐小读"
     toolbar: ToolbarSettings = ToolbarSettings()
     capture: CaptureSettings = CaptureSettings()
+    ocr: OcrSettings = OcrSettings()
 
 
 def _table(data: dict[str, Any], name: str) -> dict[str, Any]:
@@ -60,14 +65,15 @@ def load_settings(path: Path) -> AppSettings:
     app = _table(raw, "app")
     toolbar = _table(raw, "toolbar")
     capture = _table(raw, "capture")
+    ocr = _table(raw, "ocr")
 
     app_name = app.get("name", "乐小读")
     if not isinstance(app_name, str) or not app_name.strip():
         raise SettingsError("app.name 必须是非空字符串")
 
-    output_dir = capture.get("output_dir", "artifacts")
-    if not isinstance(output_dir, str) or not output_dir.strip():
-        raise SettingsError("capture.output_dir 必须是非空字符串")
+    model_cache_dir = ocr.get("model_cache_dir", "E:/DevCaches/paddlex")
+    if not isinstance(model_cache_dir, str) or not model_cache_dir.strip():
+        raise SettingsError("ocr.model_cache_dir 必须是非空字符串")
 
     return AppSettings(
         app_name=app_name,
@@ -79,6 +85,6 @@ def load_settings(path: Path) -> AppSettings:
         capture=CaptureSettings(
             width=_integer(capture, "width", 480),
             height=_integer(capture, "height", 270),
-            output_dir=Path(output_dir),
         ),
+        ocr=OcrSettings(model_cache_dir=Path(model_cache_dir)),
     )

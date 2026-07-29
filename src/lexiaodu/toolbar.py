@@ -27,8 +27,8 @@ class FloatingToolbar(QToolBar):
         title.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.addWidget(title)
 
-        capture_action = QAction("截图验证", self)
-        capture_action.setToolTip("截取主屏幕中央的演示区域")
+        capture_action = QAction("框选截图", self)
+        capture_action.setToolTip("拖框截取聊天区域并识别文字")
         capture_action.triggered.connect(self.capture_requested.emit)
         self.addAction(capture_action)
 
@@ -65,6 +65,10 @@ class FloatingToolbar(QToolBar):
 
     def set_status(self, text: str) -> None:
         self._status.setText(text)
+
+    @property
+    def status_text(self) -> str:
+        return self._status.text()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:

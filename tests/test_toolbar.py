@@ -16,5 +16,6 @@ def test_toolbar_is_frameless_and_stays_on_top() -> None:
     assert toolbar.windowFlags() & Qt.WindowType.FramelessWindowHint
     assert toolbar.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
     assert toolbar.size().width() == 360
+    assert any(action.text() == "框选截图" for action in toolbar.actions())
 
     toolbar.close()

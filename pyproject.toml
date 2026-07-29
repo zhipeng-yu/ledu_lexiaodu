@@ -14,7 +14,13 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "numpy>=1.26,<3",
     "pytest>=8,<9",
+]
+ocr = [
+    "numpy>=1.26,<3",
+    "paddleocr==3.3.2",
+    "paddlepaddle==3.2.2",
 ]
 
 [project.scripts]

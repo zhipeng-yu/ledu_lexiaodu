@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Protocol
 
-from PySide6.QtGui import QGuiApplication, QScreen
+from PySide6.QtGui import QGuiApplication, QImage, QScreen
 
 from lexiaodu.domain import ScreenRegion
 
@@ -15,16 +14,22 @@ class CaptureError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class CaptureResult:
-    output_path: Path
+    image: QImage
     region: ScreenRegion
     screen_name: str
-    pixel_width: int
-    pixel_height: int
+
+    @property
+    def pixel_width(self) -> int:
+        return self.image.width()
+
+    @property
+    def pixel_height(self) -> int:
+        return self.image.height()
 
 
 class ScreenCapture(Protocol):
-    def capture(self, region: ScreenRegion, output_path: Path) -> CaptureResult:
-        """Capture one logical desktop region to an image file."""
+    def capture(self, region: ScreenRegion) -> CaptureResult:
+        """Capture one logical desktop region into memory."""
 
 
 def screen_bounds(screen: QScreen) -> ScreenRegion:
@@ -51,9 +56,9 @@ def local_region(region: ScreenRegion, bounds: ScreenRegion) -> ScreenRegion:
 
 
 class QtScreenCapture:
-    """Minimal QScreen adapter for a single-screen capture."""
+    """QScreen adapter that keeps the captured pixels in memory."""
 
-    def capture(self, region: ScreenRegion, output_path: Path) -> CaptureResult:
+    def capture(self, region: ScreenRegion) -> CaptureResult:
         if QGuiApplication.instance() is None:
             raise CaptureError("截图前必须先创建 Qt 应用")
 
@@ -79,14 +84,8 @@ class QtScreenCapture:
         if pixmap.isNull():
             raise CaptureError("Qt 未能从目标屏幕取得图像")
 
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        if not pixmap.save(str(output_path), "PNG"):
-            raise CaptureError(f"无法保存截图: {output_path}")
-
         return CaptureResult(
-            output_path=output_path,
+            image=pixmap.toImage().copy(),
             region=region,
             screen_name=screen.name(),
-            pixel_width=pixmap.width(),
-            pixel_height=pixmap.height(),
         )

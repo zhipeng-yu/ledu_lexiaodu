@@ -9,4 +9,6 @@ top_margin = 24
 [capture]
 width = 480
 height = 270
-output_dir = "artifacts"
+
+[ocr]
+model_cache_dir = "E:/DevCaches/paddlex"
