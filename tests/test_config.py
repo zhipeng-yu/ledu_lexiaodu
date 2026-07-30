@@ -11,6 +11,8 @@ def test_load_project_settings() -> None:
     assert settings.app_name == "乐小读"
     assert settings.capture.width == 480
     assert settings.ocr.model_cache_dir == Path("E:/DevCaches/paddlex")
+    assert settings.knowledge.root_dir == Path("knowledge")
+    assert settings.knowledge.database_path == Path("data/knowledge.sqlite3")
 
 
 def test_reject_non_positive_capture_size(tmp_path: Path) -> None:
@@ -26,4 +28,12 @@ def test_reject_empty_ocr_cache_path(tmp_path: Path) -> None:
     path.write_text('[ocr]\nmodel_cache_dir = "  "\n', encoding="utf-8")
 
     with pytest.raises(SettingsError, match="model_cache_dir"):
+        load_settings(path)
+
+
+def test_reject_empty_knowledge_database_path(tmp_path: Path) -> None:
+    path = tmp_path / "invalid.toml"
+    path.write_text('[knowledge]\ndatabase_path = "  "\n', encoding="utf-8")
+
+    with pytest.raises(SettingsError, match="database_path"):
         load_settings(path)

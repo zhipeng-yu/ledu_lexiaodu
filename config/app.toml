@@ -12,3 +12,7 @@ height = 270
 
 [ocr]
 model_cache_dir = "E:/DevCaches/paddlex"
+
+[knowledge]
+root_dir = "knowledge"
+database_path = "data/knowledge.sqlite3"

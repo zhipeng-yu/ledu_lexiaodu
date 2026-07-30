@@ -1,6 +1,6 @@
 # 乐小读
 
-“乐小读”五日 MVP 的 Day 2 版本。悬浮工具可拖框截取聊天区域，在内存中调用本地 PaddleOCR，按文字左右位置初判家长/顾问，并打开校正窗口供用户编辑文字、调整发言人或手动粘贴内容。
+“乐小读”五日 MVP 的 Day 3 版本。除 Day 2 的截图、OCR 与校正流程外，当前版本可从本地 TXT、DOCX 和文本型 PDF 建立知识索引，并按 `policy`（权威知识）或 `style_case`（风格案例）进行互不混合的 BM25 检索。
 
 ## 环境
 
@@ -13,7 +13,7 @@ $env:PIP_CACHE_DIR = 'E:\DevCaches\pip'
 .\.venv\python.exe -m pip install -e ".[dev,ocr]" --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cpu/
 ```
 
-这些命令不会安装依赖到 Conda base。若仅需运行无 OCR 的手动粘贴兜底，可安装 `.[dev]`；应用会在 PaddleOCR 不可用时自动降级。
+这些命令不会安装依赖到 Conda base。若仅需运行无 OCR 的手动粘贴兜底和知识检索，可安装 `.[dev]`；应用会在 PaddleOCR 不可用时自动降级。
 
 PaddleOCR 首次运行会下载 PP-OCRv5 mobile 检测和识别模型。默认模型缓存为 `E:\DevCaches\paddlex`，可在 `config/app.toml` 的 `ocr.model_cache_dir` 中修改。
 
@@ -40,6 +40,37 @@ PaddleOCR 首次运行会下载 PP-OCRv5 mobile 检测和识别模型。默认�
 .\.venv\python.exe -m lexiaodu --capture-smoke
 ```
 
+## 本地知识库
+
+在配置的知识根目录下建立两个分类子目录。支持继续在分类目录中建立更深层级，但可索引文档不能放在这两个分类之外：
+
+```text
+knowledge/
+├── policy/       # 制度、产品规则等权威知识
+└── style_case/   # 仅用于参考表达方式的案例
+```
+
+支持 UTF-8 TXT、DOCX 和文本型 PDF；扫描型 PDF 不做 OCR，会在重建时明确报错。TXT 与 DOCX 按标题记录章节，PDF 按页记录页码，长内容切分为不超过 500 字符的切片。文档和切片的来源元数据保存在本地 SQLite `data/knowledge.sqlite3` 中。
+
+重建整个本地索引：
+
+```powershell
+.\.venv\python.exe -m lexiaodu --rebuild-knowledge
+```
+
+检索时必须显式选择知识类型，最多返回 3 条 BM25 结果。每条结果包含文档名、章节或页码以及证据片段：
+
+```powershell
+.\.venv\python.exe -m lexiaodu --search "请假流程" --knowledge-type policy
+.\.venv\python.exe -m lexiaodu --search "如何温和表达" --knowledge-type style_case
+```
+
+也可以先重建后立即检索：
+
+```powershell
+.\.venv\python.exe -m lexiaodu --rebuild-knowledge --search "请假流程" --knowledge-type policy
+```
+
 运行测试：
 
 ```powershell
@@ -53,5 +84,6 @@ PaddleOCR 首次运行会下载 PP-OCRv5 mobile 检测和识别模型。默认�
 
 - 聊天截图不会写入磁盘，也没有截图历史记录。
 - OCR 模型权重是可复用开发缓存，不包含用户截图。
+- 知识索引仅写入配置的本地 SQLite 文件；`policy` 与 `style_case` 检索在查询层强制隔离。
 - PaddlePaddle 3.2 在 Windows 导入时会创建一个很小的 `%USERPROFILE%\.cache\paddle\dataset` 目录；模型权重仍使用上述 E 盘缓存。
-- 当前校正结果只驻留在校正窗口中，尚未接入 Day 3 后续流程或持久化。
+- 当前校正结果只驻留在校正窗口中；知识检索通过独立 API/CLI 使用，尚未由 OCR 校正窗口自动触发。

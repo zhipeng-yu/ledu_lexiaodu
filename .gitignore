@@ -19,6 +19,8 @@ dist/
 # Runtime artifacts (screenshots, logs)
 artifacts/
 *.log
+data/
+knowledge/
 
 # Editors and operating systems
 .idea/

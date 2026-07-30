@@ -1,68 +1,88 @@
-# 乐小读 Day 2 Handoff
+# 乐小读 Day 3 Handoff
 
-更新时间：2026-07-29
+更新时间：2026-07-30
 
 ## 开始门槛
 
-- 开始前确认 `HEAD` 与 `origin/main` 均为 Day 1 最新提交 `78832d7`（`feat: bootstrap Day 1 MVP`）。
-- Day 1 基线测试为 8 tests passed；工作区开始时无未提交改动。
+- 开始时当前分支为 `agent/fix-chat-ocr-false-positives`，`HEAD` 为 `60ec1ca`（`Fix chat OCR false positives`）。
+- 已确认 Day 2 提交 `0be7638`（`feat: implement Day 2 capture and OCR workflow`）是当前 `HEAD` 的祖先。
+- 开始时工作区无未提交改动；Day 2 基线测试为 25 tests passed。
 
 ## 完成范围
 
-- 将悬浮工具的操作改为“框选截图”，新增覆盖虚拟桌面的半透明拖框选择层，支持 `Esc` 取消。
-- 将截图协议改为只返回内存中的 `QImage`；删除截图目录创建、PNG 保存和输出路径字段。
-- 接入本地 PaddleOCR 3.x CPU 推理，直接把 `QImage` 转换为 BGR `numpy.ndarray`，不经过临时图片文件。
-- 固定使用轻量的 `PP-OCRv5_mobile_det` 和 `PP-OCRv5_mobile_rec` 模型，识别置信度阈值为 0.90。
-- 针对固定左右气泡布局过滤非消息内容：删除完全落在左右最外侧
-  3.5% 的头像/设备图标结果，以及中心位于画面 40%–60% 的时间戳或系统信息。
-- 根据文字框中心位置做角色初判：画面左半边为“家长”，右半边（含中线）为“顾问”。
-- 新增 OCR 校正窗口，可逐条修改文字和发言人、删除或添加发言，并显示 OCR 置信度。
-- OCR 依赖缺失、模型不可用、推理失败或没有识别结果时，均打开校正窗口并提供手动粘贴文字、指定家长/顾问的兜底。
-- 新增选区、内存截图结构、OCR 结果解析、角色判定、图像转换、校正 UI 和端到端控制器测试。
+- 支持导入 UTF-8 TXT、DOCX 和文本型 PDF；扫描型 PDF 会明确拒绝，不会静默建立空索引。
+- TXT 与 DOCX 按标题/Heading 段落记录章节，PDF 按页记录页码。
+- 章节或页面正文按句子边界切分，单个切片最长 500 字符。
+- 使用本地 SQLite 保存文档路径、名称、知识类型、格式、大小、修改时间、索引时间，以及切片顺序、章节/页码和正文。
+- 实现本地 BM25 检索；中文使用单字和双字组合分词，英文和数字按词分词。
+- 单次检索最多返回 Top 3，并展示知识类型、文档名、章节或页码、证据片段。
+- 知识目录强制使用 `policy/` 和 `style_case/` 两个分类子目录；未分类的受支持文档会阻止重建。
+- 每次检索必须显式指定 `policy` 或 `style_case`，SQL 查询只加载选定分类，权威知识和风格案例不会混排。
+- 实现全量目录重建；解析先于 SQLite 替换，成功后清除已删除文档留下的旧索引。
+- 新增命令行重建与检索入口，并补充虚构的月莓学院、星舟、云鲸等测试资料。
+
+## 使用方式
+
+知识目录结构：
+
+```text
+knowledge/
+├── policy/
+└── style_case/
+```
+
+重建索引：
+
+```powershell
+.\.venv\python.exe -m lexiaodu --rebuild-knowledge
+```
+
+检索权威知识：
+
+```powershell
+.\.venv\python.exe -m lexiaodu --search "请假流程" --knowledge-type policy
+```
+
+检索风格案例：
+
+```powershell
+.\.venv\python.exe -m lexiaodu --search "如何温和表达" --knowledge-type style_case
+```
+
+也可组合 `--rebuild-knowledge` 与 `--search`，在重建后立即检索。
 
 ## 主要文件
 
-- `src/lexiaodu/selection.py`：虚拟桌面拖框层和选区坐标归一化。
-- `src/lexiaodu/capture.py`：只返回内存 `QImage` 的单屏截图协议与 Qt 实现。
-- `src/lexiaodu/ocr.py`：PaddleOCR 延迟加载、`QImage` 到 BGR 数组转换、聊天内容过滤、结果解析和角色初判。
-- `src/lexiaodu/editor.py`：OCR 文字/发言人校正及手动粘贴界面。
-- `src/lexiaodu/workflow.py`：串联悬浮工具、选区、截图、OCR 和校正窗口的控制器。
-- `src/lexiaodu/app.py`：Day 2 应用装配及纯内存截图烟测入口。
-- `config/app.toml`：PaddleX 模型缓存目录，默认 `E:/DevCaches/paddlex`。
-- `pyproject.toml`：可选 `ocr` 依赖组，固定 PaddleOCR 3.3.2 / PaddlePaddle 3.2.2。
-- `tests/`：Day 1 测试及 Day 2 单元、UI、集成测试。
+- `src/lexiaodu/knowledge.py`：格式解析、来源定位、文档切分、SQLite 重建、BM25 和结果展示。
+- `src/lexiaodu/app.py`：`--rebuild-knowledge`、`--search`、`--knowledge-type` 命令行入口。
+- `src/lexiaodu/config.py` / `config/app.toml`：知识目录和 SQLite 路径设置。
+- `pyproject.toml`：新增 `pypdf>=5,<7` 运行依赖。
+- `tests/test_knowledge.py`：三种格式、切分、元数据、Top 3、分类隔离和重建测试。
+- `tests/test_knowledge_cli.py`：命令行来源展示和显式分类要求测试。
+- `README.md`：Day 3 目录约定、重建及检索说明。
 
 ## 验证结果
 
-- `.\.venv\python.exe --version`：Python 3.11.15。
-- `.\.venv\python.exe -m pytest`：25 tests passed。
+- `.\.venv\python.exe -m pytest -q`：33 tests passed。
 - `.\.venv\python.exe -m compileall -q src tests`：通过。
 - `.\.venv\python.exe -m pip check`：No broken requirements found。
-- PaddleOCR 模型级内存烟测：
-  - PaddlePaddle 3.2.2、PaddleOCR 3.3.2。
-  - 模型从 `E:\DevCaches\paddlex\official_models` 加载。
-  - 从内存像素识别出 `PARENT HELLO`（0.984）和 `ADVISOR WELCOME`（0.987）。
-  - 未创建输入、截图或 OCR 结果文件。
-- `.\.venv\python.exe -m lexiaodu --capture-smoke`：通过；主屏
-  `B160QAN02.7`，内存图像 720 × 405 物理像素，未生成图片文件。
-- 固定左右布局样例回归：准确保留 `1234567`、`上课时间是什么`、
-  `您好`、`123`、`456` 及对应角色，过滤 `16:45` 和头像图标假文字；
-  本样例消息精确率与召回率均为 100%。
+- PDF 回归测试使用测试期间生成的最小文本型 PDF，确认 `pypdf` 实际提取第一页文本。
+- DOCX 回归测试使用测试期间生成的标准 `word/document.xml`，确认 Heading 章节来源。
+- 重建回归确认删除旧源文件后，旧文档与旧切片不会残留在 SQLite。
 
-## 已知问题与 Day 2 边界
+## 已知边界
 
-- OCR 过滤和角色判断针对固定左右气泡布局；中央消息、紧贴最外侧的消息、
-  不同聊天软件或左右身份相反的界面仍可能需要人工校正。
-- 仍只支持完整落在单个屏幕内的框选区域；跨屏框选会明确报错。
-- OCR 初始化和推理当前在 GUI 主线程执行，首次模型加载期间界面可能暂时无响应。
-- 首次 OCR 需要联网下载模型；缓存完成后可从本地模型运行。
-- PaddlePaddle 3.2 在 Windows 导入时会创建 `%USERPROFILE%\.cache\paddle\dataset` 小目录；模型权重已放在 E 盘缓存。
-- 截图和校正后的文本都未持久化；校正结果尚未进入 Day 3 的后续处理。
-- 受限桌面会话可能让真实屏幕采集得到黑图；纯函数、UI 结构和工作流已自动测试。
+- PDF 仅支持自带文本层的文件；扫描型 PDF 没有接入 OCR。
+- TXT 仅接受 UTF-8/UTF-8 BOM；DOCX 章节优先识别 Word Heading 样式和常见中文章节标题。
+- 当前 BM25 是关键词检索，不提供同义词或向量语义召回。
+- 当前仅提供全量重建，没有文件监听或增量索引。
+- OCR 校正结果尚未自动触发知识检索；Day 4 可调用 `KnowledgeBase.search()` 接入后续建议流程。
+- Day 2 的固定左右气泡过滤、单屏框选和 OCR 主线程加载等既有边界未改变。
 
 ## 后续可复用接口
 
-- 截图来源继续实现 `lexiaodu.capture.ScreenCapture`，输入 `ScreenRegion`，输出包含内存 `QImage` 的 `CaptureResult`。
-- OCR 来源可实现 `lexiaodu.ocr.OcrEngine`，输出 `TranscriptLine` 列表，无需修改工作流。
-- `TranscriptEditor.transcript()` 可取得人工校正后的发言列表，供 Day 3 接续处理。
-- `Speaker.PARENT` / `Speaker.ADVISOR` 是统一的家长/顾问标识。
+- `KnowledgeBase(root_dir, database_path).rebuild()`：从本地分类目录全量重建 SQLite。
+- `KnowledgeBase.search(query, KnowledgeType.POLICY)`：检索权威知识，最多返回 3 条。
+- `KnowledgeBase.search(query, KnowledgeType.STYLE_CASE)`：检索风格案例，最多返回 3 条。
+- `SearchResult`：提供 `document_name`、`locator`、`evidence`、`score` 和 `knowledge_type`。
+- `format_search_results()`：生成带文档名、章节/页码和证据片段的本地展示文本。

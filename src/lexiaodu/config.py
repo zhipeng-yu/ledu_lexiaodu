@@ -29,11 +29,18 @@ class OcrSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class KnowledgeSettings:
+    root_dir: Path = Path("knowledge")
+    database_path: Path = Path("data/knowledge.sqlite3")
+
+
+@dataclass(frozen=True, slots=True)
 class AppSettings:
     app_name: str = "乐小读"
     toolbar: ToolbarSettings = ToolbarSettings()
     capture: CaptureSettings = CaptureSettings()
     ocr: OcrSettings = OcrSettings()
+    knowledge: KnowledgeSettings = KnowledgeSettings()
 
 
 def _table(data: dict[str, Any], name: str) -> dict[str, Any]:
@@ -66,6 +73,7 @@ def load_settings(path: Path) -> AppSettings:
     toolbar = _table(raw, "toolbar")
     capture = _table(raw, "capture")
     ocr = _table(raw, "ocr")
+    knowledge = _table(raw, "knowledge")
 
     app_name = app.get("name", "乐小读")
     if not isinstance(app_name, str) or not app_name.strip():
@@ -74,6 +82,13 @@ def load_settings(path: Path) -> AppSettings:
     model_cache_dir = ocr.get("model_cache_dir", "E:/DevCaches/paddlex")
     if not isinstance(model_cache_dir, str) or not model_cache_dir.strip():
         raise SettingsError("ocr.model_cache_dir 必须是非空字符串")
+
+    knowledge_root = knowledge.get("root_dir", "knowledge")
+    if not isinstance(knowledge_root, str) or not knowledge_root.strip():
+        raise SettingsError("knowledge.root_dir 必须是非空字符串")
+    database_path = knowledge.get("database_path", "data/knowledge.sqlite3")
+    if not isinstance(database_path, str) or not database_path.strip():
+        raise SettingsError("knowledge.database_path 必须是非空字符串")
 
     return AppSettings(
         app_name=app_name,
@@ -87,4 +102,8 @@ def load_settings(path: Path) -> AppSettings:
             height=_integer(capture, "height", 270),
         ),
         ocr=OcrSettings(model_cache_dir=Path(model_cache_dir)),
+        knowledge=KnowledgeSettings(
+            root_dir=Path(knowledge_root),
+            database_path=Path(database_path),
+        ),
     )
