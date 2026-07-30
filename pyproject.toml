@@ -31,5 +31,5 @@ lexiaodu = "lexiaodu.app:main"
 where = ["src"]
 
 [tool.pytest.ini_options]
-addopts = "-ra"
+addopts = "-ra --basetemp=artifacts/pytest"
 testpaths = ["tests"]

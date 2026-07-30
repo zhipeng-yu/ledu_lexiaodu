@@ -12,7 +12,7 @@ class SettingsError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class ToolbarSettings:
-    width: int = 360
+    width: int = 460
     height: int = 52
     top_margin: int = 24
 
@@ -93,7 +93,7 @@ def load_settings(path: Path) -> AppSettings:
     return AppSettings(
         app_name=app_name,
         toolbar=ToolbarSettings(
-            width=_integer(toolbar, "width", 360),
+            width=_integer(toolbar, "width", 460),
             height=_integer(toolbar, "height", 52),
             top_margin=_integer(toolbar, "top_margin", 24, allow_zero=True),
         ),

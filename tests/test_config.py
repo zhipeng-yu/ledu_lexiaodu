@@ -9,6 +9,7 @@ def test_load_project_settings() -> None:
     settings = load_settings(Path("config/app.toml"))
 
     assert settings.app_name == "乐小读"
+    assert settings.toolbar.width == 460
     assert settings.capture.width == 480
     assert settings.ocr.model_cache_dir == Path("E:/DevCaches/paddlex")
     assert settings.knowledge.root_dir == Path("knowledge")

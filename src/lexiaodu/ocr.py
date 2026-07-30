@@ -15,6 +15,9 @@ MIN_TEXT_CONFIDENCE = 0.90
 EDGE_EXCLUSION_RATIO = 0.035
 CENTER_EXCLUSION_MIN_RATIO = 0.40
 CENTER_EXCLUSION_MAX_RATIO = 0.60
+TEXT_DETECTION_MAX_SIDE = 1600
+MIN_MESSAGE_TEXT_CONTRAST = 120.0
+TEXT_BOX_SAMPLE_PADDING = 2
 
 
 class OcrError(RuntimeError):
@@ -59,6 +62,9 @@ class TranscriptLine:
 
 
 class OcrEngine(Protocol):
+    def preload(self) -> None:
+        """Load the OCR runtime and models before the first recognition."""
+
     def recognize(self, image: QImage) -> list[TranscriptLine]:
         """Recognize positioned text from an in-memory image."""
 
@@ -174,6 +180,43 @@ def lines_from_paddle_results(
     )
 
 
+def filter_visual_metadata(
+    lines: Iterable[TranscriptLine],
+    pixels: Any,
+    numpy_module: Any,
+) -> list[TranscriptLine]:
+    """Remove low-contrast UI metadata such as nicknames and quote previews."""
+
+    image_height, image_width = pixels.shape[:2]
+    filtered: list[TranscriptLine] = []
+    for line in lines:
+        if line.box is None:
+            filtered.append(line)
+            continue
+
+        left = max(0, line.box.left - TEXT_BOX_SAMPLE_PADDING)
+        top = max(0, line.box.top - TEXT_BOX_SAMPLE_PADDING)
+        right = min(image_width, line.box.right + TEXT_BOX_SAMPLE_PADDING)
+        bottom = min(image_height, line.box.bottom + TEXT_BOX_SAMPLE_PADDING)
+        crop = pixels[top:bottom, left:right]
+        if crop.size == 0 or crop.ndim != 3 or crop.shape[2] < 3:
+            filtered.append(line)
+            continue
+
+        luminance = (
+            crop[:, :, 0].astype(float) * 0.114
+            + crop[:, :, 1].astype(float) * 0.587
+            + crop[:, :, 2].astype(float) * 0.299
+        )
+        contrast = float(
+            numpy_module.percentile(luminance, 95)
+            - numpy_module.percentile(luminance, 5)
+        )
+        if contrast >= MIN_MESSAGE_TEXT_CONTRAST:
+            filtered.append(line)
+    return filtered
+
+
 def qimage_to_bgr_array(image: QImage, numpy_module: Any) -> Any:
     """Copy a QImage into the BGR ndarray layout expected by PaddleOCR."""
 
@@ -201,6 +244,7 @@ class PaddleOcrEngine:
     def _load(self) -> None:
         if self._model is not None:
             return
+        os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
         os.environ.setdefault(
             "PADDLE_PDX_CACHE_HOME", str(self._model_cache_dir.resolve())
         )
@@ -230,14 +274,22 @@ class PaddleOcrEngine:
         except Exception as exc:
             raise OcrUnavailableError(f"本地 OCR 模型不可用: {exc}") from exc
 
+    def preload(self) -> None:
+        self._load()
+
     def recognize(self, image: QImage) -> list[TranscriptLine]:
         self._load()
         if self._numpy is None or self._model is None:
             raise OcrUnavailableError("本地 PaddleOCR 未正确初始化")
         try:
             pixels = qimage_to_bgr_array(image, self._numpy)
-            results = self._model.predict(input=pixels)
-            return lines_from_paddle_results(results, image.width())
+            results = self._model.predict(
+                input=pixels,
+                text_det_limit_side_len=TEXT_DETECTION_MAX_SIDE,
+                text_det_limit_type="max",
+            )
+            lines = lines_from_paddle_results(results, image.width())
+            return filter_visual_metadata(lines, pixels, self._numpy)
         except OcrError:
             raise
         except Exception as exc:

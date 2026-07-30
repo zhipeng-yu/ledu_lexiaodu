@@ -1,88 +1,81 @@
-# 乐小读 Day 3 Handoff
+# 乐小读 OCR 与 AI 问答功能交接
 
 更新时间：2026-07-30
 
-## 开始门槛
+## 当前基线
 
-- 开始时当前分支为 `agent/fix-chat-ocr-false-positives`，`HEAD` 为 `60ec1ca`（`Fix chat OCR false positives`）。
-- 已确认 Day 2 提交 `0be7638`（`feat: implement Day 2 capture and OCR workflow`）是当前 `HEAD` 的祖先。
-- 开始时工作区无未提交改动；Day 2 基线测试为 25 tests passed。
+- 当前分支：`main`。
+- 本轮开发基于提交 `0509edf`（`feat: implement Day 3 local knowledge retrieval`）。
+- 本轮覆盖截图 OCR 性能与稳定性、聊天界面误识别过滤，以及顾问手动输入家长问题的网页端 AI 问答入口。
 
-## 完成范围
+## 本轮完成范围
 
-- 支持导入 UTF-8 TXT、DOCX 和文本型 PDF；扫描型 PDF 会明确拒绝，不会静默建立空索引。
-- TXT 与 DOCX 按标题/Heading 段落记录章节，PDF 按页记录页码。
-- 章节或页面正文按句子边界切分，单个切片最长 500 字符。
-- 使用本地 SQLite 保存文档路径、名称、知识类型、格式、大小、修改时间、索引时间，以及切片顺序、章节/页码和正文。
-- 实现本地 BM25 检索；中文使用单字和双字组合分词，英文和数字按词分词。
-- 单次检索最多返回 Top 3，并展示知识类型、文档名、章节或页码、证据片段。
-- 知识目录强制使用 `policy/` 和 `style_case/` 两个分类子目录；未分类的受支持文档会阻止重建。
-- 每次检索必须显式指定 `policy` 或 `style_case`，SQL 查询只加载选定分类，权威知识和风格案例不会混排。
-- 实现全量目录重建；解析先于 SQLite 替换，成功后清除已删除文档留下的旧索引。
-- 新增命令行重建与检索入口，并补充虚构的月莓学院、星舟、云鲸等测试资料。
+### 截图 OCR 性能与稳定性
 
-## 使用方式
+- 应用启动后使用单独的 OCR 工作线程预加载 PaddleOCR 模型，避免第一次截图后才加载模型。
+- 截图识别在后台线程执行，主界面不会在模型推理期间阻塞。
+- OCR 运行期间禁止重复启动截图选择；识别完成后恢复正常流程。
+- 文字检测阶段将最长边限制为 1600 像素，降低大尺寸聊天截图的检测耗时，输出坐标仍对应原图。
+- 设置 `PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True`，避免启动时进行不必要的模型源连通性检查。
+- 修复关闭截图相关窗口后应用进程提前退出的问题；只有点击工具栏“关闭”或正常退出应用时才关闭 OCR 工作线程。
+- OCR 不可用或识别失败时仍打开手动粘贴校正窗口，并显示明确状态。
 
-知识目录结构：
+### 昵称、时间与引用消息过滤
 
-```text
-knowledge/
-├── policy/
-└── style_case/
-```
+- 保留原有置信度、左右边缘和画面中心区域过滤规则。
+- 新增文字框局部亮度对比度检测，过滤微信界面中的浅灰昵称、时间戳和引用预览。
+- 正常的深色家长消息、顾问消息以及绿色消息气泡内的深色正文会被保留。
+- OCR 校正窗口确认后，通过统一的 `transcript_ready` 信号输出最终对话数据。
 
-重建索引：
+### 网页端 AI 单列问答工作台
 
-```powershell
-.\.venv\python.exe -m lexiaodu --rebuild-knowledge
-```
+- 工具栏新增“AI 问答”入口，顾问可以不截图，直接手动输入家长问题。
+- 对话采用类似网页端 AI 产品的居中单列内容流，不使用聊天软件式左右气泡。
+- 每条内容包含“家长问题”或“AI”角色标题，以及可选择复制的纯文本正文。
+- 家长问题和 AI 回复使用不同的浅色整行背景，但保持相同内容宽度与左对齐排版。
+- 输入区固定在窗口底部；Enter 发送，Shift+Enter 换行，空白内容不会发送。
+- 发送后显示等待 AI 回复状态，不生成模拟回答。
+- 窗口关闭并重新打开后，当前进程内的多轮记录仍然保留；退出应用后不持久化。
+- 手动问题同时通过 `ai_question_submitted(str)` 和统一的 `transcript_ready` 数据接口输出。
 
-检索权威知识：
+## 可复用接口
 
-```powershell
-.\.venv\python.exe -m lexiaodu --search "请假流程" --knowledge-type policy
-```
-
-检索风格案例：
-
-```powershell
-.\.venv\python.exe -m lexiaodu --search "如何温和表达" --knowledge-type style_case
-```
-
-也可组合 `--rebuild-knowledge` 与 `--search`，在重建后立即检索。
+- `CaptureController.transcript_ready`：输出截图校正结果或手动输入的家长问题。
+- `CaptureController.ai_question_submitted`：仅输出手动提交的问题文本。
+- `CaptureController.append_ai_response(text)`：API 接入后将真实 AI 回复写入当前问答窗口。
+- `AiChatDialog.question_submitted(str)`：窗口级问题提交信号。
+- `AiChatDialog.messages`：读取当前进程内按时间排列的问答记录。
+- `AiChatDialog.append_ai_response(text)`：按纯文本追加 AI 回复。
 
 ## 主要文件
 
-- `src/lexiaodu/knowledge.py`：格式解析、来源定位、文档切分、SQLite 重建、BM25 和结果展示。
-- `src/lexiaodu/app.py`：`--rebuild-knowledge`、`--search`、`--knowledge-type` 命令行入口。
-- `src/lexiaodu/config.py` / `config/app.toml`：知识目录和 SQLite 路径设置。
-- `pyproject.toml`：新增 `pypdf>=5,<7` 运行依赖。
-- `tests/test_knowledge.py`：三种格式、切分、元数据、Top 3、分类隔离和重建测试。
-- `tests/test_knowledge_cli.py`：命令行来源展示和显式分类要求测试。
-- `README.md`：Day 3 目录约定、重建及检索说明。
+- `src/lexiaodu/ocr.py`：OCR 预加载、检测尺寸限制和视觉元数据过滤。
+- `src/lexiaodu/workflow.py`：后台 OCR 工作线程、结果信号、编辑器提交和 AI 问答控制。
+- `src/lexiaodu/chat.py`：网页端单列 AI 问答界面与键盘行为。
+- `src/lexiaodu/toolbar.py`：新增 AI 问答入口。
+- `src/lexiaodu/app.py`：应用生命周期和 OCR 工作线程关闭。
+- `README.md`：截图识别和手动 AI 问答使用说明。
+- `tests/test_ocr.py`、`tests/test_workflow.py`、`tests/test_chat.py`：相关回归与交互测试。
 
-## 验证结果
+## 验证命令
 
-- `.\.venv\python.exe -m pytest -q`：33 tests passed。
-- `.\.venv\python.exe -m compileall -q src tests`：通过。
-- `.\.venv\python.exe -m pip check`：No broken requirements found。
-- PDF 回归测试使用测试期间生成的最小文本型 PDF，确认 `pypdf` 实际提取第一页文本。
-- DOCX 回归测试使用测试期间生成的标准 `word/document.xml`，确认 Heading 章节来源。
-- 重建回归确认删除旧源文件后，旧文档与旧切片不会残留在 SQLite。
+```powershell
+.\.venv\python.exe -m pytest -q
+.\.venv\python.exe -m compileall -q src tests
+.\.venv\python.exe -m pip check
+```
 
-## 已知边界
+本轮最终验证结果：
 
-- PDF 仅支持自带文本层的文件；扫描型 PDF 没有接入 OCR。
-- TXT 仅接受 UTF-8/UTF-8 BOM；DOCX 章节优先识别 Word Heading 样式和常见中文章节标题。
-- 当前 BM25 是关键词检索，不提供同义词或向量语义召回。
-- 当前仅提供全量重建，没有文件监听或增量索引。
-- OCR 校正结果尚未自动触发知识检索；Day 4 可调用 `KnowledgeBase.search()` 接入后续建议流程。
-- Day 2 的固定左右气泡过滤、单屏框选和 OCR 主线程加载等既有边界未改变。
+- 完整测试：42 tests passed。
+- Python 编译检查：通过。
+- 依赖一致性检查：`No broken requirements found`。
+- AI 问答离屏布局检查：单列整行内容流和固定输入区正常；离屏平台未加载中文字体，但控件 Unicode 文案已由自动化测试验证。
 
-## 后续可复用接口
+## 已知边界与后续工作
 
-- `KnowledgeBase(root_dir, database_path).rebuild()`：从本地分类目录全量重建 SQLite。
-- `KnowledgeBase.search(query, KnowledgeType.POLICY)`：检索权威知识，最多返回 3 条。
-- `KnowledgeBase.search(query, KnowledgeType.STYLE_CASE)`：检索风格案例，最多返回 3 条。
-- `SearchResult`：提供 `document_name`、`locator`、`evidence`、`score` 和 `knowledge_type`。
-- `format_search_results()`：生成带文档名、章节/页码和证据片段的本地展示文本。
+- AI API 尚未接入；目前只提交问题并显示等待状态，接入后调用 `append_ai_response()` 写入真实结果。
+- 聊天记录仅保留在当前应用进程内，没有数据库持久化。
+- 昵称和引用过滤基于浅灰文字的局部对比度启发式规则；不同微信主题、缩放比例或自定义配色可能需要继续调整阈值。
+- PaddleOCR 仍是单工作线程串行推理，同一时间只处理一张截图。
+- 扫描型 PDF 的知识库导入仍未接入 OCR，与本轮聊天截图 OCR 流程相互独立。

@@ -7,6 +7,7 @@ from PySide6.QtWidgets import QApplication, QLabel, QSizePolicy, QToolBar
 
 class FloatingToolbar(QToolBar):
     capture_requested = Signal()
+    ai_chat_requested = Signal()
 
     def __init__(self, app_name: str, width: int, height: int) -> None:
         super().__init__()
@@ -31,6 +32,11 @@ class FloatingToolbar(QToolBar):
         capture_action.setToolTip("拖框截取聊天区域并识别文字")
         capture_action.triggered.connect(self.capture_requested.emit)
         self.addAction(capture_action)
+
+        chat_action = QAction("AI 问答", self)
+        chat_action.setToolTip("手动输入家长问题并与 AI 多轮问答")
+        chat_action.triggered.connect(self.ai_chat_requested.emit)
+        self.addAction(chat_action)
 
         close_action = QAction("关闭", self)
         close_action.triggered.connect(QApplication.quit)

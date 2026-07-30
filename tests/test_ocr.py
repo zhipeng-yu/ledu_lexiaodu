@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import numpy
@@ -9,7 +10,10 @@ from lexiaodu.ocr import (
     OcrUnavailableError,
     PaddleOcrEngine,
     Speaker,
+    TEXT_DETECTION_MAX_SIDE,
     TextBox,
+    TranscriptLine,
+    filter_visual_metadata,
     infer_speaker,
     lines_from_paddle_results,
     qimage_to_bgr_array,
@@ -158,3 +162,104 @@ def test_runtime_import_failure_is_reported_as_ocr_unavailable(
 
     with pytest.raises(OcrUnavailableError, match="未安装"):
         engine.recognize(QImage(10, 10, QImage.Format.Format_RGB32))
+
+
+def test_preload_reuses_model_and_limits_large_detection_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    constructor_calls: list[dict[str, object]] = []
+    predict_calls: list[dict[str, object]] = []
+
+    class FakeModel:
+        def predict(self, **kwargs: object) -> list[dict[str, object]]:
+            predict_calls.append(kwargs)
+            return [{"rec_texts": [], "rec_boxes": []}]
+
+    def build_model(**kwargs: object) -> FakeModel:
+        constructor_calls.append(kwargs)
+        return FakeModel()
+
+    paddleocr = SimpleNamespace(PaddleOCR=build_model)
+
+    def fake_import(name: str) -> object:
+        if name == "numpy":
+            return numpy
+        if name == "paddleocr":
+            return paddleocr
+        raise AssertionError(f"unexpected import: {name}")
+
+    monkeypatch.setattr("lexiaodu.ocr.import_module", fake_import)
+    engine = PaddleOcrEngine(Path("E:/DevCaches/paddlex"))
+    image = QImage(2000, 800, QImage.Format.Format_RGB32)
+    image.fill(QColor("white"))
+
+    engine.preload()
+    assert engine.recognize(image) == []
+
+    assert len(constructor_calls) == 1
+    assert len(predict_calls) == 1
+    assert numpy.array_equal(
+        predict_calls[0]["input"],
+        qimage_to_bgr_array(image, numpy),
+    )
+    assert (
+        predict_calls[0]["text_det_limit_side_len"]
+        == TEXT_DETECTION_MAX_SIDE
+    )
+    assert predict_calls[0]["text_det_limit_type"] == "max"
+
+
+def test_filter_gray_nicknames_and_quoted_previews_from_chat_lines() -> None:
+    pixels = numpy.full((220, 1000, 3), 255, dtype=numpy.uint8)
+    nickname_box = TextBox(60, 10, 240, 30)
+    parent_message_box = TextBox(80, 40, 300, 75)
+    advisor_message_box = TextBox(650, 100, 920, 135)
+    quote_preview_box = TextBox(560, 145, 900, 167)
+
+    def draw_text_strokes(box: TextBox, value: int) -> None:
+        pixels[
+            box.top : box.bottom,
+            box.left : box.right : 4,
+        ] = value
+
+    pixels[
+        advisor_message_box.top - 2 : advisor_message_box.bottom + 2,
+        advisor_message_box.left - 2 : advisor_message_box.right + 2,
+    ] = [105, 236, 149]
+    draw_text_strokes(nickname_box, 160)
+    draw_text_strokes(parent_message_box, 15)
+    draw_text_strokes(advisor_message_box, 15)
+    draw_text_strokes(quote_preview_box, 165)
+    lines = [
+        TranscriptLine(
+            Speaker.PARENT,
+            "17网安-张义伟",
+            nickname_box,
+            0.99,
+        ),
+        TranscriptLine(
+            Speaker.PARENT,
+            "收到",
+            parent_message_box,
+            1.0,
+        ),
+        TranscriptLine(
+            Speaker.ADVISOR,
+            "老公上班累 那老婆负责上老公~",
+            advisor_message_box,
+            0.97,
+        ),
+        TranscriptLine(
+            Speaker.ADVISOR,
+            "我家小猫：我也不忍心看老公这么累呀",
+            quote_preview_box,
+            0.92,
+        ),
+    ]
+
+    filtered = filter_visual_metadata(lines, pixels, numpy)
+
+    assert [(line.speaker, line.text) for line in filtered] == [
+        (Speaker.PARENT, "收到"),
+        (Speaker.ADVISOR, "老公上班累 那老婆负责上老公~"),
+    ]

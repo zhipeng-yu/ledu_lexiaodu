@@ -69,6 +69,11 @@ def _position_toolbar(toolbar: FloatingToolbar, settings: AppSettings) -> None:
     toolbar.move(x, available.y() + settings.toolbar.top_margin)
 
 
+def _configure_application(application: QApplication, app_name: str) -> None:
+    application.setApplicationName(app_name)
+    application.setQuitOnLastWindowClosed(False)
+
+
 def run(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
@@ -113,7 +118,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         return 0
 
     application = QApplication([sys.argv[0]])
-    application.setApplicationName(settings.app_name)
+    _configure_application(application, settings.app_name)
 
     if args.capture_smoke:
         try:
@@ -138,6 +143,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         QtScreenCapture(),
         PaddleOcrEngine(settings.ocr.model_cache_dir),
     )
+    application.aboutToQuit.connect(controller.shutdown)
     _position_toolbar(toolbar, settings)
     toolbar.show()
     exit_code = application.exec()

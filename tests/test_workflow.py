@@ -2,13 +2,17 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from threading import Thread, current_thread
+from time import monotonic
 
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QImage
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QDialog, QPlainTextEdit
 
 from lexiaodu.capture import CaptureResult
+from lexiaodu.chat import AiChatDialog, ChatMessage, ChatRole
 from lexiaodu.domain import ScreenRegion
 from lexiaodu.ocr import (
     OcrUnavailableError,
@@ -48,15 +52,21 @@ class FakeOcr:
     def __init__(self, unavailable: bool = False) -> None:
         self.unavailable = unavailable
         self.image: QImage | None = None
+        self.preload_count = 0
+        self.recognize_thread: Thread | None = None
+
+    def preload(self) -> None:
+        self.preload_count += 1
 
     def recognize(self, image: QImage) -> list[TranscriptLine]:
         self.image = image
+        self.recognize_thread = current_thread()
         if self.unavailable:
             raise OcrUnavailableError("本地 PaddleOCR 未安装")
         return [TranscriptLine(speaker=Speaker.PARENT, text="识别文字")]
 
 
-class FakeEditor(QWidget):
+class FakeEditor(QDialog):
     instances: list["FakeEditor"] = []
 
     def __init__(
@@ -66,6 +76,37 @@ class FakeEditor(QWidget):
         self.lines = list(lines)
         self.notice = notice
         self.__class__.instances.append(self)
+
+    def transcript(self) -> list[TranscriptLine]:
+        return self.lines
+
+
+def wait_until(predicate: Callable[[], bool], timeout_ms: int = 1000) -> None:
+    deadline = monotonic() + timeout_ms / 1000
+    while not predicate():
+        if monotonic() >= deadline:
+            raise AssertionError("等待异步 OCR 结果超时")
+        QTest.qWait(1)
+
+
+def test_ocr_models_preload_before_capture() -> None:
+    application = QApplication.instance() or QApplication([])
+    toolbar = FloatingToolbar("乐小读", 360, 52)
+    ocr = FakeOcr()
+    controller = CaptureController(
+        toolbar,
+        FakeCapture(),
+        ocr,
+        selector_factory=FakeSelector,
+        editor_factory=FakeEditor,
+    )
+
+    assert application is not None
+    wait_until(lambda: ocr.preload_count == 1)
+    assert ocr.image is None
+
+    controller.shutdown()
+    toolbar.close()
 
 
 def test_toolbar_selection_capture_ocr_editor_integration() -> None:
@@ -82,6 +123,8 @@ def test_toolbar_selection_capture_ocr_editor_integration() -> None:
         selector_factory=lambda: selector,
         editor_factory=FakeEditor,
     )
+    ready: list[list[TranscriptLine]] = []
+    controller.transcript_ready.connect(ready.append)
     region = ScreenRegion(100, 50, 1000, 500)
 
     assert application is not None
@@ -90,15 +133,26 @@ def test_toolbar_selection_capture_ocr_editor_integration() -> None:
     selector.region_selected.emit(region)
 
     assert capture.region == region
-    assert ocr.image is capture.image
+    assert FakeEditor.instances == []
+    assert toolbar.status_text == "正在识别…"
+    wait_until(lambda: bool(FakeEditor.instances))
+
+    assert ocr.image is not None
+    assert ocr.image.cacheKey() == capture.image.cacheKey()
+    assert ocr.preload_count == 1
+    assert ocr.recognize_thread is not current_thread()
     assert FakeEditor.instances[-1].lines == [
         TranscriptLine(speaker=Speaker.PARENT, text="识别文字")
     ]
     assert toolbar.status_text == "识别到 1 条文字"
 
-    FakeEditor.instances[-1].close()
+    FakeEditor.instances[-1].accept()
+    assert ready == [
+        [TranscriptLine(speaker=Speaker.PARENT, text="识别文字")]
+    ]
+    assert toolbar.status_text == "已确认 1 条文字，等待 AI 处理"
+    controller.shutdown()
     toolbar.close()
-    del controller
 
 
 def test_ocr_unavailable_opens_manual_fallback_editor() -> None:
@@ -116,6 +170,8 @@ def test_ocr_unavailable_opens_manual_fallback_editor() -> None:
 
     assert application is not None
     controller.capture_region(ScreenRegion(0, 0, 1000, 500))
+    assert toolbar.status_text == "正在识别…"
+    wait_until(lambda: bool(FakeEditor.instances))
 
     editor = FakeEditor.instances[-1]
     assert editor.lines == []
@@ -123,5 +179,59 @@ def test_ocr_unavailable_opens_manual_fallback_editor() -> None:
     assert toolbar.status_text == "OCR 不可用，可手动粘贴"
 
     editor.close()
+    controller.shutdown()
     toolbar.close()
-    del controller
+
+
+def test_ai_chat_submits_parent_questions_and_preserves_history() -> None:
+    application = QApplication.instance() or QApplication([])
+    toolbar = FloatingToolbar("乐小读", 460, 52)
+    chat = AiChatDialog()
+    controller = CaptureController(
+        toolbar,
+        FakeCapture(),
+        FakeOcr(),
+        selector_factory=FakeSelector,
+        editor_factory=FakeEditor,
+        chat_factory=lambda: chat,
+    )
+    questions: list[str] = []
+    ready: list[list[TranscriptLine]] = []
+    controller.ai_question_submitted.connect(questions.append)
+    controller.transcript_ready.connect(ready.append)
+
+    assert application is not None
+    toolbar.ai_chat_requested.emit()
+    chat_input = chat.findChild(QPlainTextEdit, "chatInput")
+    assert chat.isVisible()
+    assert chat_input is not None
+    chat_input.setPlainText("孩子不愿意阅读怎么办？")
+    assert chat.send_question()
+
+    assert questions == ["孩子不愿意阅读怎么办？"]
+    assert ready == [
+        [
+            TranscriptLine(
+                speaker=Speaker.PARENT,
+                text="孩子不愿意阅读怎么办？",
+            )
+        ]
+    ]
+    assert toolbar.status_text == "已提交家长问题，等待 AI 回复"
+
+    controller.append_ai_response("可以先从孩子感兴趣的主题开始。")
+    assert chat.messages == (
+        ChatMessage(ChatRole.QUESTION, "孩子不愿意阅读怎么办？"),
+        ChatMessage(
+            ChatRole.ASSISTANT,
+            "可以先从孩子感兴趣的主题开始。",
+        ),
+    )
+    chat.hide()
+    toolbar.ai_chat_requested.emit()
+    assert chat.isVisible()
+    assert len(chat.messages) == 2
+
+    chat.close()
+    controller.shutdown()
+    toolbar.close()

@@ -10,12 +10,13 @@ from lexiaodu.toolbar import FloatingToolbar
 
 def test_toolbar_is_frameless_and_stays_on_top() -> None:
     application = QApplication.instance() or QApplication([])
-    toolbar = FloatingToolbar("乐小读", width=360, height=52)
+    toolbar = FloatingToolbar("乐小读", width=460, height=52)
 
     assert application is not None
     assert toolbar.windowFlags() & Qt.WindowType.FramelessWindowHint
     assert toolbar.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
-    assert toolbar.size().width() == 360
+    assert toolbar.size().width() == 460
     assert any(action.text() == "框选截图" for action in toolbar.actions())
+    assert any(action.text() == "AI 问答" for action in toolbar.actions())
 
     toolbar.close()
