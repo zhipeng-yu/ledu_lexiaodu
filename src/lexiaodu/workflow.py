@@ -32,7 +32,7 @@ class CaptureController(QObject):
     _unavailable = Signal(str)
     _failed = Signal(str)
     _suggestion_ready = Signal(object)
-    _suggestion_failed = Signal(str)
+    _suggestion_failed = Signal(object)
 
     def __init__(
         self,
@@ -45,6 +45,7 @@ class CaptureController(QObject):
             [Sequence[TranscriptLine], str], TranscriptEditor
         ] = TranscriptEditor,
         chat_factory: Callable[[], AiChatDialog] = AiChatDialog,
+        advice_factory: Callable[[], AiChatDialog] = AiChatDialog,
         advice_service: AdviceService | None = None,
         feedback_store: FeedbackStore | None = None,
     ) -> None:
@@ -55,11 +56,13 @@ class CaptureController(QObject):
         self._selector_factory = selector_factory
         self._editor_factory = editor_factory
         self._chat_factory = chat_factory
+        self._advice_factory = advice_factory
         self._advice_service = advice_service
         self._feedback_store = feedback_store
         self._selector: SelectionOverlay | None = None
         self._editor: TranscriptEditor | None = None
         self._chat_dialog: AiChatDialog | None = None
+        self._advice_dialog: AiChatDialog | None = None
         self._recognition_in_progress = False
         self._shutting_down = False
 
@@ -111,6 +114,7 @@ class CaptureController(QObject):
             dialog.question_submitted.connect(self._submit_chat_question)
             dialog.feedback_submitted.connect(self._save_feedback)
             self._chat_dialog = dialog
+        self._chat_dialog.set_manual_mode()
         self._chat_dialog.show()
         self._chat_dialog.raise_()
         self._chat_dialog.activateWindow()
@@ -125,7 +129,8 @@ class CaptureController(QObject):
         self.ai_question_submitted.emit(text)
         lines = [TranscriptLine(speaker=Speaker.PARENT, text=text)]
         self.transcript_ready.emit(lines)
-        self._request_suggestion(lines)
+        if self._chat_dialog is not None:
+            self._request_suggestion(lines, self._chat_dialog)
 
     @Slot(str)
     def append_ai_response(self, text: str) -> None:
@@ -140,6 +145,7 @@ class CaptureController(QObject):
     def _request_suggestion(
         self,
         lines: Sequence[TranscriptLine],
+        target: AiChatDialog,
     ) -> None:
         if (
             self._advice_service is None
@@ -151,43 +157,49 @@ class CaptureController(QObject):
             f"{line.speaker.value}：{line.text.strip()}"
             for line in lines
         )
-        if self._chat_dialog is not None:
-            self._chat_dialog.set_generating()
+        if not target.is_advice_mode:
+            target.set_generating()
         future = self._advice_executor.submit(
             self._advice_service.create,
             transcript,
         )
-        future.add_done_callback(self._suggestion_done)
+        future.add_done_callback(
+            lambda completed, target=target: self._suggestion_done(
+                completed,
+                target,
+            )
+        )
 
     def _suggestion_done(
         self,
         future: Future[AdviceSuggestion],
+        target: AiChatDialog,
     ) -> None:
         if self._shutting_down:
             return
         try:
             suggestion = future.result()
         except Exception as exc:
-            self._suggestion_failed.emit(str(exc))
+            self._suggestion_failed.emit((target, str(exc)))
         else:
-            self._suggestion_ready.emit(suggestion)
+            self._suggestion_ready.emit((target, suggestion))
 
     @Slot(object)
-    def _show_suggestion(self, suggestion: AdviceSuggestion) -> None:
-        if self._chat_dialog is None:
-            self.start_ai_chat()
-        if (
-            self._chat_dialog is not None
-            and self._chat_dialog.append_suggestion(suggestion)
-        ):
+    def _show_suggestion(
+        self,
+        result: tuple[AiChatDialog, AdviceSuggestion],
+    ) -> None:
+        target, suggestion = result
+        if target.append_suggestion(suggestion):
             self._toolbar.set_status("建议已生成，请核对后使用")
 
-    @Slot(str)
-    def _show_suggestion_error(self, message: str) -> None:
-        if self._chat_dialog is None:
-            self.start_ai_chat()
-        if self._chat_dialog is not None:
-            self._chat_dialog.show_generation_error(message)
+    @Slot(object)
+    def _show_suggestion_error(
+        self,
+        result: tuple[AiChatDialog, str],
+    ) -> None:
+        target, message = result
+        target.show_generation_error(message)
         self._toolbar.set_status("建议生成失败，请检查知识索引")
 
     @Slot(object)
@@ -293,15 +305,17 @@ class CaptureController(QObject):
             else f"已确认 {len(lines)} 条文字，等待 AI 处理"
         )
         self.transcript_ready.emit(lines)
-        self.start_ai_chat()
-        if self._chat_dialog is not None:
-            self._chat_dialog.append_parent_context(
-                "\n".join(
-                    f"{line.speaker.value}：{line.text.strip()}"
-                    for line in lines
-                )
-            )
-        self._request_suggestion(lines)
+        if self._advice_service is None:
+            return
+        if self._advice_dialog is None:
+            dialog = self._advice_factory()
+            dialog.feedback_submitted.connect(self._save_feedback)
+            self._advice_dialog = dialog
+        self._advice_dialog.begin_advice_session(len(lines))
+        self._advice_dialog.show()
+        self._advice_dialog.raise_()
+        self._advice_dialog.activateWindow()
+        self._request_suggestion(lines, self._advice_dialog)
 
     @Slot()
     def shutdown(self) -> None:

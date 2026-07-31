@@ -163,6 +163,28 @@ def test_chat_supports_multiple_turns_and_scrolls_to_latest() -> None:
     dialog.close()
 
 
+def test_advice_mode_is_result_only_without_question_composer() -> None:
+    application = QApplication.instance() or QApplication([])
+    dialog = AiChatDialog()
+    composer = dialog.findChild(QPlainTextEdit, "chatInput")
+    assert composer is not None
+
+    dialog.begin_advice_session(3)
+    dialog.show()
+    application.processEvents()
+
+    assert dialog.windowTitle() == "顾问建议"
+    assert dialog.is_advice_mode
+    assert "已确认 3 条 OCR 对话" in dialog.status_text
+    assert not composer.isVisible()
+
+    dialog.set_manual_mode()
+    assert dialog.windowTitle() == "AI 问答"
+    assert not dialog.is_advice_mode
+    assert composer.isVisible()
+    dialog.close()
+
+
 def test_structured_suggestion_contains_complete_editable_workspace() -> None:
     application = QApplication.instance() or QApplication([])
     dialog = AiChatDialog()

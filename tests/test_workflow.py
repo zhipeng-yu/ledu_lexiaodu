@@ -240,6 +240,9 @@ def test_ai_chat_submits_parent_questions_and_preserves_history() -> None:
     chat_input = chat.findChild(QPlainTextEdit, "chatInput")
     assert chat.isVisible()
     assert chat_input is not None
+    assert chat.windowTitle() == "AI 问答"
+    assert not chat.is_advice_mode
+    assert chat_input.isVisible()
     chat_input.setPlainText("孩子不愿意阅读怎么办？")
     assert chat.send_question()
 
@@ -310,10 +313,11 @@ def test_ai_chat_generates_structured_suggestion_in_background() -> None:
     toolbar.close()
 
 
-def test_confirmed_ocr_transcript_opens_same_suggestion_workspace() -> None:
+def test_confirmed_ocr_transcript_opens_result_only_suggestion_workspace() -> None:
     application = QApplication.instance() or QApplication([])
     toolbar = FloatingToolbar("乐小读", 460, 52)
-    chat = AiChatDialog()
+    manual_chat = AiChatDialog()
+    advice_dialog = AiChatDialog()
     advice = FakeAdviceService()
     FakeEditor.instances.clear()
     controller = CaptureController(
@@ -322,25 +326,33 @@ def test_confirmed_ocr_transcript_opens_same_suggestion_workspace() -> None:
         FakeOcr(),
         selector_factory=FakeSelector,
         editor_factory=FakeEditor,
-        chat_factory=lambda: chat,
+        chat_factory=lambda: manual_chat,
+        advice_factory=lambda: advice_dialog,
         advice_service=advice,
     )
 
     assert application is not None
-    controller._show_editor(
-        [TranscriptLine(Speaker.PARENT, "孩子这周怎么安排阅读？")],
-        "请核对",
-    )
+    controller.capture_region(ScreenRegion(0, 0, 1000, 500))
+    wait_until(lambda: bool(FakeEditor.instances))
+    assert not advice_dialog.isVisible()
+    assert advice.transcripts == []
     FakeEditor.instances[-1].accept()
 
-    assert chat.isVisible()
-    wait_until(lambda: len(chat.messages) == 2)
-    assert chat.messages[0] == ChatMessage(
-        ChatRole.QUESTION,
-        "家长：孩子这周怎么安排阅读？",
+    assert advice_dialog.isVisible()
+    assert not manual_chat.isVisible()
+    assert advice_dialog.windowTitle() == "顾问建议"
+    assert advice_dialog.is_advice_mode
+    advice_input = advice_dialog.findChild(QPlainTextEdit, "chatInput")
+    assert advice_input is not None
+    assert not advice_input.isVisible()
+    wait_until(lambda: len(advice_dialog.messages) == 1)
+    assert advice_dialog.messages[0] == ChatMessage(
+        ChatRole.ASSISTANT,
+        "您好，本周安排两次共读。",
     )
-    assert advice.transcripts == ["家长：孩子这周怎么安排阅读？"]
+    assert advice.transcripts == ["家长：识别文字"]
 
-    chat.close()
+    advice_dialog.close()
+    manual_chat.close()
     controller.shutdown()
     toolbar.close()

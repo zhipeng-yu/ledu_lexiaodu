@@ -338,6 +338,7 @@ class AiChatDialog(QDialog):
     def __init__(self) -> None:
         super().__init__()
         self._messages: list[ChatMessage] = []
+        self._advice_mode = False
         self.setObjectName("aiChatDialog")
         self.setWindowTitle("AI 问答")
         self.resize(880, 680)
@@ -346,9 +347,9 @@ class AiChatDialog(QDialog):
         layout.setContentsMargins(20, 18, 20, 18)
         layout.setSpacing(10)
 
-        title = QLabel("AI 家长问题分析")
-        title.setObjectName("chatTitle")
-        layout.addWidget(title)
+        self._title = QLabel("AI 家长问题分析")
+        self._title.setObjectName("chatTitle")
+        layout.addWidget(self._title)
 
         self._status = QLabel(
             "本地检索与模拟生成已就绪；建议发送前请人工核对。"
@@ -372,9 +373,9 @@ class AiChatDialog(QDialog):
         self._history.setSpacing(0)
         layout.addWidget(self._history, 1)
 
-        composer = QFrame()
-        composer.setObjectName("chatComposer")
-        composer_layout = QVBoxLayout(composer)
+        self._composer = QFrame()
+        self._composer.setObjectName("chatComposer")
+        composer_layout = QVBoxLayout(self._composer)
         composer_layout.setContentsMargins(12, 10, 12, 10)
         composer_layout.setSpacing(8)
 
@@ -398,7 +399,7 @@ class AiChatDialog(QDialog):
         self._send_button.clicked.connect(self.send_question)
         actions.addWidget(self._send_button)
         composer_layout.addLayout(actions)
-        layout.addWidget(composer)
+        layout.addWidget(self._composer)
 
         self.setStyleSheet(
             """
@@ -564,6 +565,25 @@ class AiChatDialog(QDialog):
     def status_text(self) -> str:
         return self._status.text()
 
+    @property
+    def is_advice_mode(self) -> bool:
+        return self._advice_mode
+
+    def set_manual_mode(self) -> None:
+        self._advice_mode = False
+        self.setWindowTitle("AI 问答")
+        self._title.setText("AI 家长问题分析")
+        self._composer.setVisible(True)
+
+    def begin_advice_session(self, line_count: int) -> None:
+        self._advice_mode = True
+        self.setWindowTitle("顾问建议")
+        self._title.setText("顾问建议工作台")
+        self._composer.setVisible(False)
+        self._status.setText(
+            f"已确认 {line_count} 条 OCR 对话，正在生成后续建议…"
+        )
+
     @Slot()
     def send_question(self) -> bool:
         text = self._input.toPlainText().strip()
@@ -601,7 +621,7 @@ class AiChatDialog(QDialog):
         card = _SuggestionCard(suggestion)
         card.feedback_submitted.connect(self.feedback_submitted.emit)
         self._append_turn_widget(card)
-        self._status.setText("建议已生成，可编辑、核对并复制。")
+        self._status.setText("后续建议已生成，可编辑、核对并复制。")
         return True
 
     def set_generating(self) -> None:

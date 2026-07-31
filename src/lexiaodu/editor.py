@@ -97,9 +97,10 @@ class TranscriptEditor(QDialog):
         )
         manual_actions.addWidget(add_advisor)
         manual_actions.addStretch()
-        close_button = QPushButton("完成")
-        close_button.clicked.connect(self.accept)
-        manual_actions.addWidget(close_button)
+        confirm_button = QPushButton("确认无误并生成建议")
+        confirm_button.setObjectName("confirmTranscript")
+        confirm_button.clicked.connect(self.accept)
+        manual_actions.addWidget(confirm_button)
         layout.addLayout(manual_actions)
 
     @property

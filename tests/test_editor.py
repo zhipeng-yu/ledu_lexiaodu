@@ -2,7 +2,13 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QComboBox, QPlainTextEdit, QTableWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QComboBox,
+    QPlainTextEdit,
+    QPushButton,
+    QTableWidget,
+)
 
 from lexiaodu.editor import TranscriptEditor
 from lexiaodu.ocr import Speaker, TranscriptLine
@@ -42,4 +48,23 @@ def test_manual_paste_adds_fallback_line() -> None:
         TranscriptLine(speaker=Speaker.PARENT, text="手动粘贴的聊天文字")
     ]
     assert manual.toPlainText() == ""
+    editor.close()
+
+
+def test_ocr_editor_requires_explicit_confirmation_to_generate() -> None:
+    application = QApplication.instance() or QApplication([])
+    editor = TranscriptEditor(
+        [TranscriptLine(speaker=Speaker.PARENT, text="识别文字")]
+    )
+    confirm = editor.findChild(QPushButton, "confirmTranscript")
+    accepted: list[bool] = []
+    editor.accepted.connect(lambda: accepted.append(True))
+
+    assert application is not None
+    assert confirm is not None
+    assert confirm.text() == "确认无误并生成建议"
+    assert accepted == []
+
+    confirm.click()
+    assert accepted == [True]
     editor.close()
