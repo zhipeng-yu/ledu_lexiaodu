@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 
 from PySide6.QtCore import QObject, Signal, Slot
 
+from lexiaodu.advice import AdviceService, AdviceSuggestion
 from lexiaodu.capture import CaptureError, ScreenCapture
 from lexiaodu.chat import AiChatDialog
 from lexiaodu.domain import ScreenRegion
 from lexiaodu.editor import TranscriptEditor
+from lexiaodu.feedback import FeedbackStore, FeedbackSubmission
 from lexiaodu.ocr import (
     OcrEngine,
     OcrError,
@@ -28,6 +31,8 @@ class CaptureController(QObject):
     _recognized = Signal(object)
     _unavailable = Signal(str)
     _failed = Signal(str)
+    _suggestion_ready = Signal(object)
+    _suggestion_failed = Signal(str)
 
     def __init__(
         self,
@@ -40,6 +45,8 @@ class CaptureController(QObject):
             [Sequence[TranscriptLine], str], TranscriptEditor
         ] = TranscriptEditor,
         chat_factory: Callable[[], AiChatDialog] = AiChatDialog,
+        advice_service: AdviceService | None = None,
+        feedback_store: FeedbackStore | None = None,
     ) -> None:
         super().__init__(toolbar)
         self._toolbar = toolbar
@@ -48,6 +55,8 @@ class CaptureController(QObject):
         self._selector_factory = selector_factory
         self._editor_factory = editor_factory
         self._chat_factory = chat_factory
+        self._advice_service = advice_service
+        self._feedback_store = feedback_store
         self._selector: SelectionOverlay | None = None
         self._editor: TranscriptEditor | None = None
         self._chat_dialog: AiChatDialog | None = None
@@ -58,9 +67,19 @@ class CaptureController(QObject):
             max_workers=1,
             thread_name_prefix="lexiaodu-ocr",
         )
+        self._advice_executor = (
+            ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="lexiaodu-advice",
+            )
+            if advice_service is not None
+            else None
+        )
         self._recognized.connect(self._recognition_finished)
         self._unavailable.connect(self._recognition_unavailable)
         self._failed.connect(self._recognition_failed)
+        self._suggestion_ready.connect(self._show_suggestion)
+        self._suggestion_failed.connect(self._show_suggestion_error)
         self._ocr_executor.submit(self._preload_ocr)
 
         toolbar.capture_requested.connect(self.start_capture)
@@ -90,6 +109,7 @@ class CaptureController(QObject):
         if self._chat_dialog is None:
             dialog = self._chat_factory()
             dialog.question_submitted.connect(self._submit_chat_question)
+            dialog.feedback_submitted.connect(self._save_feedback)
             self._chat_dialog = dialog
         self._chat_dialog.show()
         self._chat_dialog.raise_()
@@ -97,11 +117,15 @@ class CaptureController(QObject):
 
     @Slot(str)
     def _submit_chat_question(self, text: str) -> None:
-        self._toolbar.set_status("已提交家长问题，等待 AI 回复")
-        self.ai_question_submitted.emit(text)
-        self.transcript_ready.emit(
-            [TranscriptLine(speaker=Speaker.PARENT, text=text)]
+        self._toolbar.set_status(
+            "已提交家长问题，正在检索知识"
+            if self._advice_service is not None
+            else "已提交家长问题，等待 AI 回复"
         )
+        self.ai_question_submitted.emit(text)
+        lines = [TranscriptLine(speaker=Speaker.PARENT, text=text)]
+        self.transcript_ready.emit(lines)
+        self._request_suggestion(lines)
 
     @Slot(str)
     def append_ai_response(self, text: str) -> None:
@@ -112,6 +136,70 @@ class CaptureController(QObject):
             and self._chat_dialog.append_ai_response(text)
         ):
             self._toolbar.set_status("AI 已回复")
+
+    def _request_suggestion(
+        self,
+        lines: Sequence[TranscriptLine],
+    ) -> None:
+        if (
+            self._advice_service is None
+            or self._advice_executor is None
+            or self._shutting_down
+        ):
+            return
+        transcript = "\n".join(
+            f"{line.speaker.value}：{line.text.strip()}"
+            for line in lines
+        )
+        if self._chat_dialog is not None:
+            self._chat_dialog.set_generating()
+        future = self._advice_executor.submit(
+            self._advice_service.create,
+            transcript,
+        )
+        future.add_done_callback(self._suggestion_done)
+
+    def _suggestion_done(
+        self,
+        future: Future[AdviceSuggestion],
+    ) -> None:
+        if self._shutting_down:
+            return
+        try:
+            suggestion = future.result()
+        except Exception as exc:
+            self._suggestion_failed.emit(str(exc))
+        else:
+            self._suggestion_ready.emit(suggestion)
+
+    @Slot(object)
+    def _show_suggestion(self, suggestion: AdviceSuggestion) -> None:
+        if self._chat_dialog is None:
+            self.start_ai_chat()
+        if (
+            self._chat_dialog is not None
+            and self._chat_dialog.append_suggestion(suggestion)
+        ):
+            self._toolbar.set_status("建议已生成，请核对后使用")
+
+    @Slot(str)
+    def _show_suggestion_error(self, message: str) -> None:
+        if self._chat_dialog is None:
+            self.start_ai_chat()
+        if self._chat_dialog is not None:
+            self._chat_dialog.show_generation_error(message)
+        self._toolbar.set_status("建议生成失败，请检查知识索引")
+
+    @Slot(object)
+    def _save_feedback(self, submission: FeedbackSubmission) -> None:
+        if self._feedback_store is None:
+            return
+        try:
+            self._feedback_store.save(submission)
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            self._toolbar.set_status(f"反馈保存失败：{exc}")
+        else:
+            self._toolbar.set_status("反馈已记录（未保存聊天正文）")
 
     def cancel_capture(self) -> None:
         self._dispose_selector()
@@ -199,8 +287,21 @@ class CaptureController(QObject):
         lines = editor.transcript()
         if not lines:
             return
-        self._toolbar.set_status(f"已确认 {len(lines)} 条文字，等待 AI 处理")
+        self._toolbar.set_status(
+            f"已确认 {len(lines)} 条文字，正在检索知识"
+            if self._advice_service is not None
+            else f"已确认 {len(lines)} 条文字，等待 AI 处理"
+        )
         self.transcript_ready.emit(lines)
+        self.start_ai_chat()
+        if self._chat_dialog is not None:
+            self._chat_dialog.append_parent_context(
+                "\n".join(
+                    f"{line.speaker.value}：{line.text.strip()}"
+                    for line in lines
+                )
+            )
+        self._request_suggestion(lines)
 
     @Slot()
     def shutdown(self) -> None:
@@ -208,3 +309,5 @@ class CaptureController(QObject):
             return
         self._shutting_down = True
         self._ocr_executor.shutdown(wait=True, cancel_futures=True)
+        if self._advice_executor is not None:
+            self._advice_executor.shutdown(wait=True, cancel_futures=True)

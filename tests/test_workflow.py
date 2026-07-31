@@ -9,17 +9,25 @@ from time import monotonic
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QImage
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QDialog, QPlainTextEdit
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QListWidget,
+    QPlainTextEdit,
+)
 
+from lexiaodu.advice import AdviceSuggestion
 from lexiaodu.capture import CaptureResult
 from lexiaodu.chat import AiChatDialog, ChatMessage, ChatRole
 from lexiaodu.domain import ScreenRegion
+from lexiaodu.knowledge import KnowledgeType, SearchResult
 from lexiaodu.ocr import (
     OcrUnavailableError,
     Speaker,
     TranscriptLine,
 )
 from lexiaodu.toolbar import FloatingToolbar
+from lexiaodu.risk import RiskAssessment, RiskLevel, TransferStatus
 from lexiaodu.workflow import CaptureController
 
 
@@ -79,6 +87,33 @@ class FakeEditor(QDialog):
 
     def transcript(self) -> list[TranscriptLine]:
         return self.lines
+
+
+class FakeAdviceService:
+    def __init__(self) -> None:
+        self.transcripts: list[str] = []
+
+    def create(self, transcript: str) -> AdviceSuggestion:
+        self.transcripts.append(transcript)
+        return AdviceSuggestion(
+            suggestion_id="generated-suggestion",
+            concern_summary="家长关注阅读安排。",
+            wechat_reply="您好，本周安排两次共读。",
+            facts=(
+                SearchResult(
+                    knowledge_type=KnowledgeType.POLICY,
+                    document_name="阅读制度.txt",
+                    locator="每周安排",
+                    evidence="每周安排两次共读。",
+                    score=2.0,
+                ),
+            ),
+            risk=RiskAssessment(
+                RiskLevel.LOW,
+                ("请核对事实。",),
+                TransferStatus.NOT_REQUIRED,
+            ),
+        )
 
 
 def wait_until(predicate: Callable[[], bool], timeout_ms: int = 1000) -> None:
@@ -231,6 +266,80 @@ def test_ai_chat_submits_parent_questions_and_preserves_history() -> None:
     toolbar.ai_chat_requested.emit()
     assert chat.isVisible()
     assert len(chat.messages) == 2
+
+    chat.close()
+    controller.shutdown()
+    toolbar.close()
+
+
+def test_ai_chat_generates_structured_suggestion_in_background() -> None:
+    application = QApplication.instance() or QApplication([])
+    toolbar = FloatingToolbar("乐小读", 460, 52)
+    chat = AiChatDialog()
+    advice = FakeAdviceService()
+    controller = CaptureController(
+        toolbar,
+        FakeCapture(),
+        FakeOcr(),
+        selector_factory=FakeSelector,
+        editor_factory=FakeEditor,
+        chat_factory=lambda: chat,
+        advice_service=advice,
+    )
+
+    assert application is not None
+    toolbar.ai_chat_requested.emit()
+    chat_input = chat.findChild(QPlainTextEdit, "chatInput")
+    history = chat.findChild(QListWidget, "chatHistory")
+    assert chat_input is not None
+    assert history is not None
+    chat_input.setPlainText("孩子这周怎么安排阅读？")
+    assert chat.send_question()
+
+    wait_until(lambda: len(chat.messages) == 2)
+    assert advice.transcripts == ["家长：孩子这周怎么安排阅读？"]
+    assert chat.messages[-1] == ChatMessage(
+        ChatRole.ASSISTANT,
+        "您好，本周安排两次共读。",
+    )
+    assert history.itemWidget(history.item(1)).objectName() == "suggestionTurn"
+    assert toolbar.status_text == "建议已生成，请核对后使用"
+
+    chat.close()
+    controller.shutdown()
+    toolbar.close()
+
+
+def test_confirmed_ocr_transcript_opens_same_suggestion_workspace() -> None:
+    application = QApplication.instance() or QApplication([])
+    toolbar = FloatingToolbar("乐小读", 460, 52)
+    chat = AiChatDialog()
+    advice = FakeAdviceService()
+    FakeEditor.instances.clear()
+    controller = CaptureController(
+        toolbar,
+        FakeCapture(),
+        FakeOcr(),
+        selector_factory=FakeSelector,
+        editor_factory=FakeEditor,
+        chat_factory=lambda: chat,
+        advice_service=advice,
+    )
+
+    assert application is not None
+    controller._show_editor(
+        [TranscriptLine(Speaker.PARENT, "孩子这周怎么安排阅读？")],
+        "请核对",
+    )
+    FakeEditor.instances[-1].accept()
+
+    assert chat.isVisible()
+    wait_until(lambda: len(chat.messages) == 2)
+    assert chat.messages[0] == ChatMessage(
+        ChatRole.QUESTION,
+        "家长：孩子这周怎么安排阅读？",
+    )
+    assert advice.transcripts == ["家长：孩子这周怎么安排阅读？"]
 
     chat.close()
     controller.shutdown()

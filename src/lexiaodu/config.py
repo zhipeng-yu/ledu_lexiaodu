@@ -35,12 +35,18 @@ class KnowledgeSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class FeedbackSettings:
+    database_path: Path = Path("data/feedback.sqlite3")
+
+
+@dataclass(frozen=True, slots=True)
 class AppSettings:
     app_name: str = "乐小读"
     toolbar: ToolbarSettings = ToolbarSettings()
     capture: CaptureSettings = CaptureSettings()
     ocr: OcrSettings = OcrSettings()
     knowledge: KnowledgeSettings = KnowledgeSettings()
+    feedback: FeedbackSettings = FeedbackSettings()
 
 
 def _table(data: dict[str, Any], name: str) -> dict[str, Any]:
@@ -74,6 +80,7 @@ def load_settings(path: Path) -> AppSettings:
     capture = _table(raw, "capture")
     ocr = _table(raw, "ocr")
     knowledge = _table(raw, "knowledge")
+    feedback = _table(raw, "feedback")
 
     app_name = app.get("name", "乐小读")
     if not isinstance(app_name, str) or not app_name.strip():
@@ -89,6 +96,14 @@ def load_settings(path: Path) -> AppSettings:
     database_path = knowledge.get("database_path", "data/knowledge.sqlite3")
     if not isinstance(database_path, str) or not database_path.strip():
         raise SettingsError("knowledge.database_path 必须是非空字符串")
+    feedback_database_path = feedback.get(
+        "database_path", "data/feedback.sqlite3"
+    )
+    if (
+        not isinstance(feedback_database_path, str)
+        or not feedback_database_path.strip()
+    ):
+        raise SettingsError("feedback.database_path 必须是非空字符串")
 
     return AppSettings(
         app_name=app_name,
@@ -105,5 +120,8 @@ def load_settings(path: Path) -> AppSettings:
         knowledge=KnowledgeSettings(
             root_dir=Path(knowledge_root),
             database_path=Path(database_path),
+        ),
+        feedback=FeedbackSettings(
+            database_path=Path(feedback_database_path),
         ),
     )

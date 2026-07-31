@@ -7,9 +7,12 @@ from typing import Sequence
 
 from PySide6.QtWidgets import QApplication
 
+from lexiaodu.advice import AdviceService
 from lexiaodu.capture import CaptureError, CaptureResult, QtScreenCapture, screen_bounds
 from lexiaodu.config import AppSettings, SettingsError, load_settings
 from lexiaodu.domain import centered_region
+from lexiaodu.feedback import FeedbackStore
+from lexiaodu.generator import SimulatedGenerator
 from lexiaodu.knowledge import (
     KnowledgeBase,
     KnowledgeError,
@@ -17,12 +20,13 @@ from lexiaodu.knowledge import (
     format_search_results,
 )
 from lexiaodu.ocr import PaddleOcrEngine
+from lexiaodu.risk import DeterministicRiskRules
 from lexiaodu.toolbar import FloatingToolbar
 from lexiaodu.workflow import CaptureController
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="乐小读 Day 3 MVP")
+    parser = argparse.ArgumentParser(description="乐小读 Day 4 MVP")
     parser.add_argument(
         "--config",
         type=Path,
@@ -142,6 +146,17 @@ def run(argv: Sequence[str] | None = None) -> int:
         toolbar,
         QtScreenCapture(),
         PaddleOcrEngine(settings.ocr.model_cache_dir),
+        advice_service=AdviceService(
+            KnowledgeBase(
+                settings.knowledge.root_dir,
+                settings.knowledge.database_path,
+            ),
+            SimulatedGenerator(),
+            DeterministicRiskRules(),
+        ),
+        feedback_store=FeedbackStore(
+            settings.feedback.database_path,
+        ),
     )
     application.aboutToQuit.connect(controller.shutdown)
     _position_toolbar(toolbar, settings)

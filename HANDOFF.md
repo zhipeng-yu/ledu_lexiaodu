@@ -1,81 +1,106 @@
-# 乐小读 OCR 与 AI 问答功能交接
+# 乐小读 Day 4 顾问建议工作台交接
 
-更新时间：2026-07-30
+更新时间：2026-07-31
 
 ## 当前基线
 
 - 当前分支：`main`。
-- 本轮开发基于提交 `0509edf`（`feat: implement Day 3 local knowledge retrieval`）。
-- 本轮覆盖截图 OCR 性能与稳定性、聊天界面误识别过滤，以及顾问手动输入家长问题的网页端 AI 问答入口。
+- Day 4 开发起点：`151f707`（`feat: optimize OCR and add AI question workspace`）。
+- 已确认该起点包含 Day 3 提交 `0509edf`（`feat: implement Day 3 local knowledge retrieval`）。
+- Day 4 将 Day 3 的本地检索接入截图 OCR 和手动问题工作流，形成可使用的建议闭环。
 
 ## 本轮完成范围
 
-### 截图 OCR 性能与稳定性
+### 真实检索驱动的生成流程
 
-- 应用启动后使用单独的 OCR 工作线程预加载 PaddleOCR 模型，避免第一次截图后才加载模型。
-- 截图识别在后台线程执行，主界面不会在模型推理期间阻塞。
-- OCR 运行期间禁止重复启动截图选择；识别完成后恢复正常流程。
-- 文字检测阶段将最长边限制为 1600 像素，降低大尺寸聊天截图的检测耗时，输出坐标仍对应原图。
-- 设置 `PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True`，避免启动时进行不必要的模型源连通性检查。
-- 修复关闭截图相关窗口后应用进程提前退出的问题；只有点击工具栏“关闭”或正常退出应用时才关闭 OCR 工作线程。
-- OCR 不可用或识别失败时仍打开手动粘贴校正窗口，并显示明确状态。
+- `AdviceService` 对每次对话分别执行 `policy` 和 `style_case` 真实检索，再调用 Generator；生成器不能绕过检索流程。
+- 默认 `SimulatedGenerator` 不需要 API。检索到制度依据时，顾虑摘要和微信短回复会使用排名第一的真实文档、定位和证据；没有制度依据时只建议转人工核实，不编造事实。
+- 建议卡的事实依据直接绑定 `SearchResult`，不接受生成器或未来模型自行返回引用。
+- 手动问题和 OCR 校正对话使用同一条后台生成链路，生成期间不阻塞 Qt 主线程。
+- 知识索引缺失或检索失败时，工作台和悬浮工具条都会显示明确错误状态。
 
-### 昵称、时间与引用消息过滤
+### 可替换 Generator 与豆包兼容准备
 
-- 保留原有置信度、左右边缘和画面中心区域过滤规则。
-- 新增文字框局部亮度对比度检测，过滤微信界面中的浅灰昵称、时间戳和引用预览。
-- 正常的深色家长消息、顾问消息以及绿色消息气泡内的深色正文会被保留。
-- OCR 校正窗口确认后，通过统一的 `transcript_ready` 信号输出最终对话数据。
+- `Generator` 是厂商无关的 Protocol，统一输入 `GenerationRequest`，输出 `SuggestionDraft`。
+- `OpenAICompatibleGenerator` 接受注入的 client 和 model，调用 `client.chat.completions.create(...)` 并要求 JSON 对象响应。
+- 当前计划接入豆包时，只需在应用装配层提供配置好 base URL、密钥和模型的 OpenAI 兼容 client。
+- 更换其他 OpenAI 兼容服务不影响检索、风险、反馈和 UI；非兼容协议可新增 Generator 适配器。
+- 当前仓库仍不要求真实 API，不安装厂商 SDK，不读取或提交 API Key。
 
-### 网页端 AI 单列问答工作台
+### 完整顾问建议工作台
 
-- 工具栏新增“AI 问答”入口，顾问可以不截图，直接手动输入家长问题。
-- 对话采用类似网页端 AI 产品的居中单列内容流，不使用聊天软件式左右气泡。
-- 每条内容包含“家长问题”或“AI”角色标题，以及可选择复制的纯文本正文。
-- 家长问题和 AI 回复使用不同的浅色整行背景，但保持相同内容宽度与左对齐排版。
-- 输入区固定在窗口底部；Enter 发送，Shift+Enter 换行，空白内容不会发送。
-- 发送后显示等待 AI 回复状态，不生成模拟回答。
-- 窗口关闭并重新打开后，当前进程内的多轮记录仍然保留；退出应用后不持久化。
-- 手动问题同时通过 `ai_question_submitted(str)` 和统一的 `transcript_ready` 数据接口输出。
+- 每条结构化建议包含：
+  - 顾虑摘要；
+  - 可直接编辑的微信短回复；
+  - 带文档名和章节/页码的事实依据；
+  - 风险等级及逐条风险提示；
+  - 明确的转人工状态。
+- 工作台保留底部输入区、Enter 发送、Shift+Enter 换行、多轮记录和关闭后重新打开的进程内历史。
+- 悬浮工具条“AI 问答”继续打开工作台；截图 OCR 校正确认后也会自动打开同一个工作台。
+- 保留 `append_ai_response(text)` 作为旧纯文本调用的兼容入口。
 
-## 可复用接口
+### 确定性风险与复制门控
 
-- `CaptureController.transcript_ready`：输出截图校正结果或手动输入的家长问题。
-- `CaptureController.ai_question_submitted`：仅输出手动提交的问题文本。
-- `CaptureController.append_ai_response(text)`：API 接入后将真实 AI 回复写入当前问答窗口。
-- `AiChatDialog.question_submitted(str)`：窗口级问题提交信号。
-- `AiChatDialog.messages`：读取当前进程内按时间排列的问答记录。
-- `AiChatDialog.append_ai_response(text)`：按纯文本追加 AI 回复。
+- 风险判断完全由本地 `DeterministicRiskRules` 执行，不采信生成模型给出的风险等级。
+- 高风险规则：退款/投诉/法律争议、人身安全/健康、隐私/个人信息、体罚/欺凌等儿童保护事件。
+- 没有 `policy` 权威依据时固定判为高风险并要求转人工。
+- 费用、合同、请假、补课、转班及保证性表述等命中中风险并建议人工复核。
+- 其他有制度依据且未命中规则的建议为低风险。
+- 高风险卡片的复制按钮默认禁用；顾问勾选“已阅读风险提示”后才可一键复制当前编辑内容。
+
+### 隐私安全反馈
+
+- 顾问可选择“有用”或“无用”，并从与选择匹配的枚举原因中提交反馈。
+- `FeedbackStore` 将反馈写入独立 SQLite 数据库，字段仅有建议 ID、有用状态、枚举原因和时间戳。
+- 反馈表没有聊天、家长问题、OCR 对话或生成回复正文字段。
+- 默认反馈路径：`data/feedback.sqlite3`，由 `[feedback].database_path` 配置。
+
+## 主要接口
+
+- `AdviceService.create(transcript)`：真实检索、生成、事实绑定和风险判断的同步核心服务。
+- `Generator.generate(request)`：可替换生成器边界。
+- `SimulatedGenerator`：默认的本地确定性实现。
+- `OpenAICompatibleGenerator(client, model)`：豆包等 OpenAI 兼容服务适配器。
+- `DeterministicRiskRules.assess(...)`：确定性风险和转人工判断。
+- `AiChatDialog.append_suggestion(suggestion)`：追加完整结构化建议卡。
+- `FeedbackStore.save(submission)`：只持久化结构化反馈元数据。
+- `CaptureController.transcript_ready`、`ai_question_submitted` 和 `append_ai_response`：继续兼容 Day 3 接口。
 
 ## 主要文件
 
-- `src/lexiaodu/ocr.py`：OCR 预加载、检测尺寸限制和视觉元数据过滤。
-- `src/lexiaodu/workflow.py`：后台 OCR 工作线程、结果信号、编辑器提交和 AI 问答控制。
-- `src/lexiaodu/chat.py`：网页端单列 AI 问答界面与键盘行为。
-- `src/lexiaodu/toolbar.py`：新增 AI 问答入口。
-- `src/lexiaodu/app.py`：应用生命周期和 OCR 工作线程关闭。
-- `README.md`：截图识别和手动 AI 问答使用说明。
-- `tests/test_ocr.py`、`tests/test_workflow.py`、`tests/test_chat.py`：相关回归与交互测试。
+- `src/lexiaodu/advice.py`：检索、生成、风险编排及结构化建议。
+- `src/lexiaodu/generator.py`：Generator Protocol、本地模拟实现和 OpenAI 兼容适配器。
+- `src/lexiaodu/risk.py`：确定性风险规则与转人工状态。
+- `src/lexiaodu/feedback.py`：隐私安全的反馈数据模型和 SQLite 存储。
+- `src/lexiaodu/chat.py`：完整建议卡、编辑、复制门控和反馈交互。
+- `src/lexiaodu/workflow.py`：手动问题/OCR 到建议工作台的后台链路。
+- `src/lexiaodu/app.py`：默认本地服务装配。
+- `tests/test_generator.py`、`tests/test_risk.py`、`tests/test_feedback.py`：Day 4 核心逻辑测试。
+- `tests/test_chat.py`、`tests/test_workflow.py`：工作台和悬浮工具端到端交互回归。
 
 ## 验证命令
 
+默认 `artifacts/pytest` 在当前机器存在既有 Windows ACL 异常，因此使用新的项目内 basetemp 路径运行测试：
+
 ```powershell
-.\.venv\python.exe -m pytest -q
+.\.venv\python.exe -m pytest -q --basetemp=artifacts\pytest-day4-final
 .\.venv\python.exe -m compileall -q src tests
 .\.venv\python.exe -m pip check
+git diff --check
 ```
 
-本轮最终验证结果：
+Day 4 最终结果：
 
-- 完整测试：42 tests passed。
+- 完整测试：59 tests passed。
 - Python 编译检查：通过。
-- 依赖一致性检查：`No broken requirements found`。
-- AI 问答离屏布局检查：单列整行内容流和固定输入区正常；离屏平台未加载中文字体，但控件 Unicode 文案已由自动化测试验证。
+- 依赖一致性：`No broken requirements found`。
+- 差异空白检查：通过；仅有 Git 的 LF/CRLF 工作区提示。
+- 离屏工作台渲染检查：结构化建议卡、高风险确认、反馈区和固定输入区布局完整；当前离屏平台未加载中文字体，但 Unicode 文案由自动化测试验证。
 
 ## 已知边界与后续工作
 
-- AI API 尚未接入；目前只提交问题并显示等待状态，接入后调用 `append_ai_response()` 写入真实结果。
-- 聊天记录仅保留在当前应用进程内，没有数据库持久化。
-- 昵称和引用过滤基于浅灰文字的局部对比度启发式规则；不同微信主题、缩放比例或自定义配色可能需要继续调整阈值。
-- PaddleOCR 仍是单工作线程串行推理，同一时间只处理一张截图。
-- 扫描型 PDF 的知识库导入仍未接入 OCR，与本轮聊天截图 OCR 流程相互独立。
+- 豆包真实 client、base URL、模型和密钥尚未装配；当前只完成可替换接口和 OpenAI 兼容适配器。
+- 风险规则是保守的确定性关键词规则；新业务风险类型需要显式补规则和测试。
+- 本地知识内容变化后仍需主动执行 `--rebuild-knowledge`。
+- 扫描型 PDF 知识导入仍不包含 OCR。
+- 聊天和建议历史仅驻留当前进程；只有结构化反馈会持久化。
