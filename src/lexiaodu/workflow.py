@@ -153,16 +153,26 @@ class CaptureController(QObject):
             or self._shutting_down
         ):
             return
-        transcript = "\n".join(
-            f"{line.speaker.value}：{line.text.strip()}"
-            for line in lines
-        )
+        try:
+            transcript = "\n".join(
+                f"{Speaker(line.speaker).value}：{line.text.strip()}"
+                for line in lines
+            )
+        except (AttributeError, TypeError, ValueError) as exc:
+            target.show_generation_error(f"对话数据无效：{exc}")
+            self._toolbar.set_status("建议生成失败，请检查校正内容")
+            return
         if not target.is_advice_mode:
             target.set_generating()
-        future = self._advice_executor.submit(
-            self._advice_service.create,
-            transcript,
-        )
+        try:
+            future = self._advice_executor.submit(
+                self._advice_service.create,
+                transcript,
+            )
+        except RuntimeError as exc:
+            target.show_generation_error(f"无法启动建议任务：{exc}")
+            self._toolbar.set_status("建议任务启动失败")
+            return
         future.add_done_callback(
             lambda completed, target=target: self._suggestion_done(
                 completed,

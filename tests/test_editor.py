@@ -28,9 +28,11 @@ def test_edit_ocr_text_and_speaker() -> None:
     table.item(0, 1).setText("校正后的文字")
     speaker.setCurrentText(Speaker.ADVISOR.value)
 
-    assert editor.transcript() == [
+    transcript = editor.transcript()
+    assert transcript == [
         TranscriptLine(speaker=Speaker.ADVISOR, text="校正后的文字")
     ]
+    assert transcript[0].speaker is Speaker.ADVISOR
     editor.close()
 
 

@@ -20,6 +20,17 @@ from lexiaodu.ocr import (
 )
 
 
+def test_transcript_line_normalizes_string_speaker_from_qt_editor() -> None:
+    line = TranscriptLine(speaker="家长", text="怎么请假")
+
+    assert line.speaker is Speaker.PARENT
+
+
+def test_transcript_line_rejects_unknown_speaker() -> None:
+    with pytest.raises(ValueError, match="发言人"):
+        TranscriptLine(speaker="未知", text="怎么请假")
+
+
 def test_build_sorted_transcript_and_infer_speaker_from_position() -> None:
     results = [
         {

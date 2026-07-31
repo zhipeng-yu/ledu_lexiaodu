@@ -57,6 +57,11 @@ class TranscriptLine:
     confidence: float | None = None
 
     def __post_init__(self) -> None:
+        try:
+            speaker = Speaker(self.speaker)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("发言人必须是家长或顾问") from exc
+        object.__setattr__(self, "speaker", speaker)
         if not self.text.strip():
             raise ValueError("发言文字不能为空")
 

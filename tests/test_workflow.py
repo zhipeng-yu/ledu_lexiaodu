@@ -14,12 +14,14 @@ from PySide6.QtWidgets import (
     QDialog,
     QListWidget,
     QPlainTextEdit,
+    QPushButton,
 )
 
 from lexiaodu.advice import AdviceSuggestion
 from lexiaodu.capture import CaptureResult
 from lexiaodu.chat import AiChatDialog, ChatMessage, ChatRole
 from lexiaodu.domain import ScreenRegion
+from lexiaodu.editor import TranscriptEditor
 from lexiaodu.knowledge import KnowledgeType, SearchResult
 from lexiaodu.ocr import (
     OcrUnavailableError,
@@ -354,5 +356,44 @@ def test_confirmed_ocr_transcript_opens_result_only_suggestion_workspace() -> No
 
     advice_dialog.close()
     manual_chat.close()
+    controller.shutdown()
+    toolbar.close()
+
+
+def test_real_editor_confirmation_reaches_generated_advice() -> None:
+    application = QApplication.instance() or QApplication([])
+    toolbar = FloatingToolbar("乐小读", 460, 52)
+    advice_dialog = AiChatDialog()
+    advice = FakeAdviceService()
+    controller = CaptureController(
+        toolbar,
+        FakeCapture(),
+        FakeOcr(),
+        selector_factory=FakeSelector,
+        editor_factory=TranscriptEditor,
+        advice_factory=lambda: advice_dialog,
+        advice_service=advice,
+    )
+
+    assert application is not None
+    controller._show_editor(
+        [TranscriptLine(Speaker.PARENT, "怎么请假")],
+        "请核对",
+    )
+    assert isinstance(controller._editor, TranscriptEditor)
+    confirm = controller._editor.findChild(
+        QPushButton,
+        "confirmTranscript",
+    )
+    assert confirm is not None
+    assert advice.transcripts == []
+
+    confirm.click()
+    wait_until(lambda: len(advice_dialog.messages) == 1)
+
+    assert advice.transcripts == ["家长：怎么请假"]
+    assert "后续建议已生成" in advice_dialog.status_text
+
+    advice_dialog.close()
     controller.shutdown()
     toolbar.close()
