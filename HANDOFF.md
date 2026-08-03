@@ -1,8 +1,18 @@
-# 乐小读 Day 4 顾问建议工作台交接
+# 乐小读 Day 5 最终集成交接
 
 更新时间：2026-08-03
 
-## 当前基线
+## Day 5 最终集成
+
+- 本轮开发起点：`51fa99f`（`feat: add incremental knowledge import`），已确认包含 Day 4 主提交 `eb655f9` 及修复 `3d35421`、`921c250`。
+- 完整自动化验收覆盖截图、OCR 校正与粘贴、真实检索、建议、高风险确认、编辑复制和结构化反馈。
+- 隐私验收确认截图流程不新增文件，日志和反馈库均不包含测试聊天正文或编辑后回复；反馈表仍只有五个元数据字段。
+- 四组固定查询的目标资料均在当前正式索引排名第 1；可用 `scripts/verify_day5_queries.py` 重复验证。
+- README、安装运行说明、五分钟演示脚本、指定电脑手动清单、顾问试用表和验收结果已经补齐。
+- 最终代码验证为 78 tests passed，Python 编译和依赖检查通过，Qt 当前会话内存截图烟测通过。
+- 最终指定演示电脑的真实聊天 OCR、DPI 缩放和剪贴板肉眼验证，以及真实顾问试用，仍须按 `docs/MANUAL_TEST_CHECKLIST.md` 和 `docs/ADVISOR_TRIAL_FORM.md` 执行。
+
+## Day 4 基线
 
 - 当前分支：`main`。
 - 本轮开发起点：`921c250`（`fix: normalize OCR speaker before advice generation`）。

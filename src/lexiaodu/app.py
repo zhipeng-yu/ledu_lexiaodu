@@ -31,7 +31,7 @@ from lexiaodu.workflow import CaptureController
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="乐小读 Day 4 MVP")
+    parser = argparse.ArgumentParser(description="乐小读五日 MVP")
     parser.add_argument(
         "--config",
         type=Path,

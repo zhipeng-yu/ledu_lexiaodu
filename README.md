@@ -1,6 +1,14 @@
-# 乐小读
+# 乐小读五日 MVP
 
-“乐小读”五日 MVP 的 Day 4 版本。除截图、OCR、校正和 Day 3 本地知识检索外，当前版本会用真实检索结果生成结构化顾问建议，并提供确定性风险提示、转人工状态、复制门控和匿名结构化反馈。
+Day 5 最终集成版覆盖完整顾问流程：截图或粘贴、OCR 校正、本地检索、结构化建议、风险确认、编辑复制和匿名结构化反馈。默认使用本地确定性生成器，不需要 API Key；事实依据来自本地知识 Top 3，风险等级由本地规则决定。
+
+## 交付导航
+
+- [安装与运行](#环境)
+- [五分钟演示脚本](docs/DEMO_SCRIPT.md)
+- [指定电脑手动测试清单](docs/MANUAL_TEST_CHECKLIST.md)
+- [顾问试用记录表](docs/ADVISOR_TRIAL_FORM.md)
+- [Day 5 验收结果](docs/ACCEPTANCE_RESULTS.md)
 
 ## 环境
 
@@ -17,6 +25,8 @@ $env:PIP_CACHE_DIR = 'E:\DevCaches\pip'
 
 PaddleOCR 首次运行会下载 PP-OCRv5 mobile 检测和识别模型。默认模型缓存为 `E:\DevCaches\paddlex`，可在 `config/app.toml` 的 `ocr.model_cache_dir` 中修改。
 
+`knowledge/`、`data/` 和 `artifacts/` 按隐私策略不提交 Git。新电脑必须先从经审核的本地资料准备 `knowledge/policy` 与 `knowledge/style_case`，再执行下文的 `--rebuild-knowledge`；不要用真实聊天截图作为安装样例。
+
 ## 运行
 
 启动置顶悬浮工具条：
@@ -24,6 +34,8 @@ PaddleOCR 首次运行会下载 PP-OCRv5 mobile 检测和识别模型。默认�
 ```powershell
 .\.venv\python.exe -m lexiaodu
 ```
+
+若只安装了 `.[dev]`，仍可使用 OCR 校正窗口的手动粘贴兜底；完整截图 OCR 演示需要安装 `.[dev,ocr]`。
 
 点击“框选截图”后拖动鼠标选择一个聊天区域：
 
@@ -139,8 +151,12 @@ OCR。移走来源只会标记“来源缺失”，不会自动删除已经审�
 运行测试：
 
 ```powershell
-.\.venv\python.exe -m pytest
+.\.venv\python.exe -B -m pytest -q -p no:cacheprovider --basetemp artifacts\pytest-day5-final
+$env:PYTHONIOENCODING = 'utf-8'
+.\.venv\python.exe -B scripts\verify_day5_queries.py
 ```
+
+第二条命令使用当前首批审核知识验证四个固定查询；小学数学、初中物理、课程时长制度和课程时长沟通案例的目标资料都必须进入 Top 3。完整演示步骤见 [演示脚本](docs/DEMO_SCRIPT.md)。
 
 截图坐标使用 Qt 的逻辑像素，并且必须完整落在同一个屏幕内。跨屏区域会被明确拒绝，不会被静默裁剪或拼接。
 当前 OCR 过滤针对固定的左右气泡布局；若真实消息可能出现在画面中央或紧贴最外侧，需要调整策略或人工粘贴校正。
@@ -154,3 +170,13 @@ OCR。移走来源只会标记“来源缺失”，不会自动删除已经审�
 - 知识索引仅写入配置的本地 SQLite 文件；`policy` 与 `style_case` 检索在查询层强制隔离。
 - PaddlePaddle 3.2 在 Windows 导入时会创建一个很小的 `%USERPROFILE%\.cache\paddle\dataset` 目录；模型权重仍使用上述 E 盘缓存。
 - 确定性高风险规则覆盖退款/投诉/法律争议、人身安全/健康、隐私和儿童保护；没有权威制度检索结果时也按高风险处理并要求转人工。
+
+## 已知限制
+
+- 默认 `SimulatedGenerator` 便于离线演示，不等同于已接入真实豆包模型；仓库只提供 OpenAI 兼容适配边界。
+- OCR 过滤针对左右聊天气泡布局；中央消息、贴边消息、复杂引用卡片和特殊缩放可能需要人工校正或粘贴兜底。
+- 截图区域必须完整位于一个屏幕，不能跨屏拼接。
+- 知识正文和 SQLite 索引是本机数据，不随 Git 分发；换电脑后需要经审核导入并重建。
+- 固定查询脚本针对当前 2026 夏秋首批知识文件名；更换知识版本时应同步审核预期文件名。
+- 聊天和建议历史只保留在当前进程；应用退出后不恢复，只有结构化反馈元数据会持久化。
+- 最终演示电脑的真实屏幕缩放、剪贴板权限、Paddle 模型首次下载和真实聊天截图识别仍须按手动测试清单逐项确认。
