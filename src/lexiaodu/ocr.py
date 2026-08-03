@@ -185,6 +185,54 @@ def lines_from_paddle_results(
     )
 
 
+def document_lines_from_paddle_results(
+    results: Iterable[Any], image_width: int
+) -> list[TranscriptLine]:
+    """Convert OCR results without chat-layout filtering.
+
+    Product documents frequently center headings or place text close to page
+    edges.  The chat-specific metadata filters used by ``recognize`` would
+    incorrectly discard that content, so document imports only enforce the
+    configured confidence threshold here.
+    """
+
+    lines: list[TranscriptLine] = []
+    for result in results:
+        payload = _result_payload(result)
+        texts = list(payload.get("rec_texts", ()))
+        boxes_value = payload.get("rec_boxes")
+        if boxes_value is None:
+            boxes_value = payload.get("rec_polys", ())
+        boxes = list(boxes_value)
+        scores = list(payload.get("rec_scores", ()))
+        if len(texts) != len(boxes):
+            raise OcrError("PaddleOCR 返回的文字与位置数量不一致")
+
+        for index, (text_value, box_value) in enumerate(zip(texts, boxes)):
+            text = str(text_value).strip()
+            if not text:
+                continue
+            confidence = float(scores[index]) if index < len(scores) else None
+            if confidence is not None and confidence < MIN_TEXT_CONFIDENCE:
+                continue
+            box = _box_from_value(box_value)
+            lines.append(
+                TranscriptLine(
+                    speaker=infer_speaker(box, image_width),
+                    text=text,
+                    box=box,
+                    confidence=confidence,
+                )
+            )
+    return sorted(
+        lines,
+        key=lambda line: (
+            line.box.top if line.box is not None else 0,
+            line.box.left if line.box is not None else 0,
+        ),
+    )
+
+
 def filter_visual_metadata(
     lines: Iterable[TranscriptLine],
     pixels: Any,
@@ -299,3 +347,22 @@ class PaddleOcrEngine:
             raise
         except Exception as exc:
             raise OcrError(f"OCR 识别失败: {exc}") from exc
+
+    def recognize_document(self, image: QImage) -> list[TranscriptLine]:
+        """Recognize document imagery without chat-layout heuristics."""
+
+        self._load()
+        if self._numpy is None or self._model is None:
+            raise OcrUnavailableError("本地 PaddleOCR 未正确初始化")
+        try:
+            pixels = qimage_to_bgr_array(image, self._numpy)
+            results = self._model.predict(
+                input=pixels,
+                text_det_limit_side_len=TEXT_DETECTION_MAX_SIDE,
+                text_det_limit_type="max",
+            )
+            return document_lines_from_paddle_results(results, image.width())
+        except OcrError:
+            raise
+        except Exception as exc:
+            raise OcrError(f"文档 OCR 识别失败: {exc}") from exc

@@ -17,5 +17,9 @@ model_cache_dir = "E:/DevCaches/paddlex"
 root_dir = "knowledge"
 database_path = "data/knowledge.sqlite3"
 
+[knowledge_import]
+source_dir = "E:/Download/word,excle文档汇总/word,excle文档汇总/乐读/数据"
+staging_dir = "artifacts/knowledge-import"
+
 [feedback]
 database_path = "data/feedback.sqlite3"

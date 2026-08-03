@@ -152,6 +152,24 @@ def test_bm25_returns_top_three_and_never_mixes_knowledge_types(
     assert "证据：" in rendered
 
 
+def test_search_uses_document_name_to_route_subject_query(
+    tmp_path: Path,
+) -> None:
+    root, policy, _ = _knowledge_dirs(tmp_path)
+    (policy / "蓝鲸化学.txt").write_text(
+        "# 课次与时长\n夏季12讲。",
+        encoding="utf-8",
+    )
+    knowledge = KnowledgeBase(root, tmp_path / "knowledge.sqlite3")
+    knowledge.rebuild()
+
+    results = knowledge.search("蓝鲸化学", KnowledgeType.POLICY)
+
+    assert len(results) == 1
+    assert results[0].document_name == "蓝鲸化学.txt"
+    assert results[0].evidence == "夏季12讲。"
+
+
 def test_rebuild_replaces_stale_index_content(tmp_path: Path) -> None:
     root, policy, _ = _knowledge_dirs(tmp_path)
     document = policy / "旧月规.txt"

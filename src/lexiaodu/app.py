@@ -19,6 +19,11 @@ from lexiaodu.knowledge import (
     KnowledgeType,
     format_search_results,
 )
+from lexiaodu.knowledge_import import (
+    KnowledgeImportError,
+    KnowledgeImportService,
+    format_link_report,
+)
 from lexiaodu.ocr import PaddleOcrEngine
 from lexiaodu.risk import DeterministicRiskRules
 from lexiaodu.toolbar import FloatingToolbar
@@ -48,6 +53,31 @@ def build_parser() -> argparse.ArgumentParser:
         "--knowledge-type",
         choices=[value.value for value in KnowledgeType],
         help="检索类型；policy 与 style_case 不会混合",
+    )
+    parser.add_argument(
+        "--prepare-knowledge-import",
+        action="store_true",
+        help="扫描新增或变化的来源资料并生成待审核批次",
+    )
+    parser.add_argument(
+        "--knowledge-source-dir",
+        type=Path,
+        help="覆盖配置中的知识来源目录，仅与准备导入一起使用",
+    )
+    parser.add_argument(
+        "--apply-knowledge-import",
+        metavar="BATCH_ID",
+        help="应用已审核的知识导入批次并重建索引",
+    )
+    parser.add_argument(
+        "--resume-knowledge-import",
+        metavar="BATCH_ID",
+        help="从最近完成的文件检查点继续被暂停的导入批次",
+    )
+    parser.add_argument(
+        "--knowledge-link-report",
+        action="store_true",
+        help="统计引用次数、唯一资料以及已入库/未入库数量",
     )
     return parser
 
@@ -95,6 +125,88 @@ def run(argv: Sequence[str] | None = None) -> int:
     if args.knowledge_type and not args.search:
         print("--knowledge-type 只能与 --search 一起使用", file=sys.stderr)
         return 2
+    if args.knowledge_source_dir and not (
+        args.prepare_knowledge_import or args.resume_knowledge_import
+    ):
+        print(
+            "--knowledge-source-dir 只能与知识导入准备或继续命令一起使用",
+            file=sys.stderr,
+        )
+        return 2
+
+    import_actions = sum(
+        bool(value)
+        for value in (
+            args.prepare_knowledge_import,
+            args.resume_knowledge_import,
+            args.apply_knowledge_import,
+            args.knowledge_link_report,
+        )
+    )
+    if import_actions > 1:
+        print("知识导入准备、应用和链接报告命令不能同时执行", file=sys.stderr)
+        return 2
+    if import_actions:
+        service = KnowledgeImportService(
+            settings.knowledge.root_dir,
+            settings.knowledge.database_path,
+            settings.knowledge_import.staging_dir,
+            (
+                PaddleOcrEngine(settings.ocr.model_cache_dir)
+                if (
+                    args.prepare_knowledge_import
+                    or args.resume_knowledge_import
+                )
+                else None
+            ),
+        )
+        try:
+            if args.prepare_knowledge_import:
+                source_dir = (
+                    args.knowledge_source_dir
+                    or settings.knowledge_import.source_dir
+                )
+                report = service.prepare(source_dir)
+                print(
+                    f"知识导入批次已准备：{report.batch_id}\n"
+                    f"审核文件：{report.review_path}\n"
+                    f"审核报告：{report.report_path}\n"
+                    f"{format_link_report(report.link_report)}"
+                )
+            elif args.resume_knowledge_import:
+                report = service.resume(
+                    args.resume_knowledge_import,
+                    args.knowledge_source_dir
+                    or settings.knowledge_import.source_dir,
+                )
+                print(
+                    f"知识导入批次已继续并准备完成：{report.batch_id}\n"
+                    f"审核文件：{report.review_path}\n"
+                    f"审核报告：{report.report_path}\n"
+                    f"{format_link_report(report.link_report)}"
+                )
+            elif args.apply_knowledge_import:
+                report = service.apply(args.apply_knowledge_import)
+                print(
+                    f"知识导入批次已应用：{report.batch_id}；"
+                    f"写入 {report.output_count} 个知识文件，"
+                    f"索引 {report.indexed_document_count} 个文档/"
+                    f"{report.indexed_chunk_count} 个切片；"
+                    f"{format_link_report(report.link_report)}"
+                )
+            else:
+                print(format_link_report(service.link_report()))
+        except KnowledgeImportError as exc:
+            print(f"知识导入错误：{exc}", file=sys.stderr)
+            return 1
+        except KeyboardInterrupt:
+            print(
+                "知识导入已暂停；已完成文件已保存，可使用 "
+                "--resume-knowledge-import <BATCH_ID> 继续。",
+                file=sys.stderr,
+            )
+            return 130
+        return 0
 
     if args.rebuild_knowledge or args.search:
         knowledge = KnowledgeBase(

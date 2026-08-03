@@ -93,6 +93,49 @@ knowledge/
 .\.venv\python.exe -m lexiaodu --rebuild-knowledge --search "请假流程" --knowledge-type policy
 ```
 
+## 增量整理来源资料
+
+来源资料目录和审核暂存目录由 `config/app.toml` 的
+`knowledge_import.source_dir`、`knowledge_import.staging_dir` 配置。来源目录递归支持
+DOCX、XLSX 和 PDF；DOCX 会读取正文、表格、图片 OCR 和超链接，XLSX 会读取工作表、
+批注、单元格链接及 `HYPERLINK` 公式，扫描 PDF 会使用文档模式 OCR。旧版 `.xls`
+需要先转换为 `.xlsx`。
+
+将新资料放入来源目录后，先准备审核批次；此步骤不会修改正式知识文件或检索索引：
+
+```powershell
+.\.venv\python.exe -m lexiaodu --prepare-knowledge-import
+```
+
+每个批次会在暂存目录生成 `review.json`、`report.md`、完整提取文本和
+`draft/knowledge/` 草稿。审核时为每个变化来源填写 `outputs`，或填写
+`excluded_reason`；只有标题与稳定链接目标完全匹配时，才把候选项加入 `aliases`。
+建议输出路径会从文件名提取年份和季节；信息不足时标记“时期待确认”，不能直接应用。
+若建议目标已有正式知识，准备阶段会复制一份到草稿区作为增量合并底稿，正式文件保持不变。
+提取文本不能直接当作正式知识，需先整理为面向顾问的短知识块，并排除内部人员、
+业务指标、排期和内部链接。
+
+审核完成后应用批次并自动重建索引：
+
+```powershell
+.\.venv\python.exe -m lexiaodu --apply-knowledge-import <BATCH_ID>
+```
+
+随时查看链接引用和未入库资料数量：
+
+```powershell
+.\.venv\python.exe -m lexiaodu --knowledge-link-report
+```
+
+准备过程中按 Ctrl+C 可以暂停。已完成文件和 OCR 缓存会保留，之后从文件检查点继续：
+
+```powershell
+.\.venv\python.exe -m lexiaodu --resume-knowledge-import <BATCH_ID>
+```
+
+文件 SHA-256 用于识别新增、修改、重命名和未变化来源；未变化文件不会重复提取或
+OCR。移走来源只会标记“来源缺失”，不会自动删除已经审核的知识。
+
 运行测试：
 
 ```powershell

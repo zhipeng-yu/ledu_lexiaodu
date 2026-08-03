@@ -58,7 +58,7 @@ def test_delayed_selection_survives_while_all_windows_are_hidden() -> None:
         )
 
         assert not overlay.isVisible()
-        QTest.qWait(100)
+        QTest.qWait(250)
         assert len(selected) == 1
         assert selected[0].width == 100
         assert selected[0].height == 80

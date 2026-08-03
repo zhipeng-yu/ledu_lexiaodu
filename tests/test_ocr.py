@@ -14,10 +14,25 @@ from lexiaodu.ocr import (
     TextBox,
     TranscriptLine,
     filter_visual_metadata,
+    document_lines_from_paddle_results,
     infer_speaker,
     lines_from_paddle_results,
     qimage_to_bgr_array,
 )
+
+
+def test_document_ocr_keeps_centered_and_edge_text() -> None:
+    results = [
+        {
+            "rec_texts": ["左侧标题", "居中课程参数"],
+            "rec_boxes": [[0, 10, 50, 40], [450, 10, 550, 40]],
+            "rec_scores": [0.99, 0.98],
+        }
+    ]
+
+    lines = document_lines_from_paddle_results(results, image_width=1000)
+
+    assert [line.text for line in lines] == ["左侧标题", "居中课程参数"]
 
 
 def test_transcript_line_normalizes_string_speaker_from_qt_editor() -> None:

@@ -451,7 +451,10 @@ class KnowledgeBase:
                 (selected_type,),
             ).fetchall()
 
-        corpus = [tokenize(f"{row['locator']} {row['text']}") for row in rows]
+        corpus = [
+            tokenize(f"{row['name']} {row['locator']} {row['text']}")
+            for row in rows
+        ]
         scores = _bm25_scores(tokenize(query), corpus)
         ranked = sorted(
             (

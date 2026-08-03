@@ -35,6 +35,12 @@ class KnowledgeSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class KnowledgeImportSettings:
+    source_dir: Path = Path("incoming_knowledge")
+    staging_dir: Path = Path("artifacts/knowledge-import")
+
+
+@dataclass(frozen=True, slots=True)
 class FeedbackSettings:
     database_path: Path = Path("data/feedback.sqlite3")
 
@@ -46,6 +52,7 @@ class AppSettings:
     capture: CaptureSettings = CaptureSettings()
     ocr: OcrSettings = OcrSettings()
     knowledge: KnowledgeSettings = KnowledgeSettings()
+    knowledge_import: KnowledgeImportSettings = KnowledgeImportSettings()
     feedback: FeedbackSettings = FeedbackSettings()
 
 
@@ -80,6 +87,7 @@ def load_settings(path: Path) -> AppSettings:
     capture = _table(raw, "capture")
     ocr = _table(raw, "ocr")
     knowledge = _table(raw, "knowledge")
+    knowledge_import = _table(raw, "knowledge_import")
     feedback = _table(raw, "feedback")
 
     app_name = app.get("name", "乐小读")
@@ -96,6 +104,14 @@ def load_settings(path: Path) -> AppSettings:
     database_path = knowledge.get("database_path", "data/knowledge.sqlite3")
     if not isinstance(database_path, str) or not database_path.strip():
         raise SettingsError("knowledge.database_path 必须是非空字符串")
+    import_source_dir = knowledge_import.get("source_dir", "incoming_knowledge")
+    if not isinstance(import_source_dir, str) or not import_source_dir.strip():
+        raise SettingsError("knowledge_import.source_dir 必须是非空字符串")
+    import_staging_dir = knowledge_import.get(
+        "staging_dir", "artifacts/knowledge-import"
+    )
+    if not isinstance(import_staging_dir, str) or not import_staging_dir.strip():
+        raise SettingsError("knowledge_import.staging_dir 必须是非空字符串")
     feedback_database_path = feedback.get(
         "database_path", "data/feedback.sqlite3"
     )
@@ -120,6 +136,10 @@ def load_settings(path: Path) -> AppSettings:
         knowledge=KnowledgeSettings(
             root_dir=Path(knowledge_root),
             database_path=Path(database_path),
+        ),
+        knowledge_import=KnowledgeImportSettings(
+            source_dir=Path(import_source_dir),
+            staging_dir=Path(import_staging_dir),
         ),
         feedback=FeedbackSettings(
             database_path=Path(feedback_database_path),

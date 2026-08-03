@@ -14,6 +14,12 @@ def test_load_project_settings() -> None:
     assert settings.ocr.model_cache_dir == Path("E:/DevCaches/paddlex")
     assert settings.knowledge.root_dir == Path("knowledge")
     assert settings.knowledge.database_path == Path("data/knowledge.sqlite3")
+    assert settings.knowledge_import.source_dir == Path(
+        "E:/Download/word,excle文档汇总/word,excle文档汇总/乐读/数据"
+    )
+    assert settings.knowledge_import.staging_dir == Path(
+        "artifacts/knowledge-import"
+    )
     assert settings.feedback.database_path == Path("data/feedback.sqlite3")
 
 
