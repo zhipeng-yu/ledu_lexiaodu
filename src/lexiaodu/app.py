@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import Sequence
 
+from dotenv import load_dotenv
+from openai import OpenAI
 from PySide6.QtWidgets import QApplication
 
 from lexiaodu.advice import AdviceService
@@ -12,7 +15,11 @@ from lexiaodu.capture import CaptureError, CaptureResult, QtScreenCapture, scree
 from lexiaodu.config import AppSettings, SettingsError, load_settings
 from lexiaodu.domain import centered_region
 from lexiaodu.feedback import FeedbackStore
-from lexiaodu.generator import SimulatedGenerator
+from lexiaodu.generator import (
+    Generator,
+    OpenAICompatibleGenerator,
+    SimulatedGenerator,
+)
 from lexiaodu.knowledge import (
     KnowledgeBase,
     KnowledgeError,
@@ -106,6 +113,47 @@ def _position_toolbar(toolbar: FloatingToolbar, settings: AppSettings) -> None:
 def _configure_application(application: QApplication, app_name: str) -> None:
     application.setApplicationName(app_name)
     application.setQuitOnLastWindowClosed(False)
+
+
+def _build_generator_from_environment() -> Generator:
+    provider = os.environ.get(
+        "LEXIAODU_GENERATOR",
+        "simulated",
+    ).strip().casefold()
+    if provider == "simulated":
+        return SimulatedGenerator()
+    if provider != "doubao":
+        raise ValueError(
+            "LEXIAODU_GENERATOR 必须是 simulated 或 doubao"
+        )
+
+    api_key = os.environ.get("ARK_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError("启用豆包时必须设置 ARK_API_KEY")
+    if not api_key.isascii():
+        raise ValueError("ARK_API_KEY 包含非 ASCII 字符")
+    model = os.environ.get("ARK_MODEL", "").strip()
+    if not model:
+        raise ValueError("启用豆包时必须设置 ARK_MODEL")
+    base_url = os.environ.get(
+        "ARK_BASE_URL",
+        "https://ark.cn-beijing.volces.com/api/v3",
+    ).strip()
+    if not base_url.startswith("https://"):
+        raise ValueError("ARK_BASE_URL 必须使用 HTTPS")
+
+    client = OpenAI(
+        api_key=api_key,
+        base_url=base_url,
+        timeout=30.0,
+        max_retries=2,
+    )
+    return OpenAICompatibleGenerator(
+        client,
+        model,
+        max_tokens=512,
+        extra_body={"thinking": {"type": "disabled"}},
+    )
 
 
 def run(argv: Sequence[str] | None = None) -> int:
@@ -248,6 +296,13 @@ def run(argv: Sequence[str] | None = None) -> int:
         )
         return 0
 
+    load_dotenv()
+    try:
+        generator = _build_generator_from_environment()
+    except ValueError as exc:
+        print(f"生成器配置错误: {exc}", file=sys.stderr)
+        return 2
+
     toolbar = FloatingToolbar(
         settings.app_name,
         settings.toolbar.width,
@@ -263,7 +318,7 @@ def run(argv: Sequence[str] | None = None) -> int:
                 settings.knowledge.root_dir,
                 settings.knowledge.database_path,
             ),
-            SimulatedGenerator(),
+            generator,
             DeterministicRiskRules(),
         ),
         feedback_store=FeedbackStore(

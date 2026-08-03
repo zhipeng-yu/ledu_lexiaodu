@@ -136,7 +136,12 @@ def test_openai_compatible_generator_uses_injected_client_and_model() -> None:
     client = SimpleNamespace(
         chat=SimpleNamespace(completions=completions)
     )
-    generator = OpenAICompatibleGenerator(client, "doubao-model")
+    generator = OpenAICompatibleGenerator(
+        client,
+        "doubao-model",
+        max_tokens=512,
+        extra_body={"thinking": {"type": "disabled"}},
+    )
     draft = generator.generate(
         GenerationRequest("请假怎么办", (policy,), ())
     )
@@ -146,6 +151,10 @@ def test_openai_compatible_generator_uses_injected_client_and_model() -> None:
     assert completions.arguments["model"] == "doubao-model"
     assert completions.arguments["response_format"] == {
         "type": "json_object"
+    }
+    assert completions.arguments["max_tokens"] == 512
+    assert completions.arguments["extra_body"] == {
+        "thinking": {"type": "disabled"}
     }
     user_message = completions.arguments["messages"][1]["content"]
     assert "需要提前申请" in user_message
@@ -168,3 +177,8 @@ def test_openai_compatible_generator_rejects_unstructured_response() -> None:
         OpenAICompatibleGenerator(client, "model").generate(
             GenerationRequest("问题", (), ())
         )
+
+
+def test_openai_compatible_generator_rejects_invalid_token_limit() -> None:
+    with pytest.raises(ValueError, match="max_tokens"):
+        OpenAICompatibleGenerator(object(), "model", max_tokens=0)

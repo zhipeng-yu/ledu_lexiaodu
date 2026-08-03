@@ -1,6 +1,6 @@
 # 乐小读五日 MVP
 
-Day 5 最终集成版覆盖完整顾问流程：截图或粘贴、OCR 校正、本地检索、结构化建议、风险确认、编辑复制和匿名结构化反馈。默认使用本地确定性生成器，不需要 API Key；事实依据来自本地知识 Top 3，风险等级由本地规则决定。
+Day 5 最终集成版覆盖完整顾问流程：截图或粘贴、OCR 校正、本地检索、豆包结构化建议、风险确认、编辑复制和匿名结构化反馈。配置方舟 API Key 后使用真实豆包模型；未启用时仍可使用本地确定性生成器。事实依据来自本地知识 Top 3，风险等级由本地规则决定。
 
 ## 交付导航
 
@@ -27,6 +27,30 @@ PaddleOCR 首次运行会下载 PP-OCRv5 mobile 检测和识别模型。默认�
 
 `knowledge/`、`data/` 和 `artifacts/` 按隐私策略不提交 Git。新电脑必须先从经审核的本地资料准备 `knowledge/policy` 与 `knowledge/style_case`，再执行下文的 `--rebuild-knowledge`；不要用真实聊天截图作为安装样例。
 
+### 豆包 API 配置
+
+复制配置模板并只在本机填写方舟模型推理 API Key：
+
+```powershell
+Copy-Item .env.example .env
+notepad .env
+```
+
+启用豆包时 `.env` 应为：
+
+```dotenv
+LEXIAODU_GENERATOR=doubao
+ARK_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
+ARK_MODEL=doubao-seed-2-0-lite-260215
+ARK_API_KEY=替换为方舟模型推理APIKey
+```
+
+`.env` 已被 Git 忽略。不要填写 Access Key ID、Secret Access Key、`Bearer` 前缀或 Coding Plan Key，也不要提交、打印或发送真实 Key。验证配置与真实结构化调用（使用虚构内容，会产生少量 Token 费用）：
+
+```powershell
+.\.venv\python.exe -B scripts\verify_doubao.py
+```
+
 ## 运行
 
 启动置顶悬浮工具条：
@@ -50,7 +74,7 @@ PaddleOCR 首次运行会下载 PP-OCRv5 mobile 检测和识别模型。默认�
 点击“AI 问答”可打开带输入框的手动问题分析窗口：
 
 1. 顾问可手动输入完整的家长问题，并在居中的单列内容流中连续追问。
-2. 每次发送都会先分别检索 `policy` 和 `style_case`，再把真实结果交给默认的本地模拟生成器。
+2. 每次发送都会先分别检索 `policy` 和 `style_case`，再把真实结果交给 `.env` 选择的豆包或本地模拟生成器。
 3. 建议卡包含顾虑摘要、可编辑微信短回复、带文档和章节定位的事实依据、风险提示及转人工状态。
 4. 低、中风险建议可一键复制编辑后的短回复；高风险建议必须先勾选风险确认，复制按钮才会启用。
 5. 可选择“有用”或“无用”并提交枚举原因。反馈数据库只记录建议 ID、选择、原因和时间，不保存聊天或回复正文。
@@ -62,11 +86,11 @@ PaddleOCR 首次运行会下载 PP-OCRv5 mobile 检测和识别模型。默认�
 
 业务流程只依赖 `Generator.generate(GenerationRequest)`，不依赖具体厂商 SDK：
 
-- `SimulatedGenerator` 是默认实现，不需要 API Key；有权威检索结果时，短回复直接使用排名第一的真实制度来源和证据，没有制度依据时只生成“转人工核实”回复。
-- `OpenAICompatibleGenerator` 接受外部注入的 `client` 和 `model`，调用标准的 `client.chat.completions.create(...)`。当前计划接入豆包时，可在应用装配层配置兼容 client 的 base URL、密钥和模型；以后更换其他 OpenAI 兼容服务不需要修改检索、风险或界面代码。
+- `SimulatedGenerator` 是无 Key 时可选的离线实现；有权威检索结果时，短回复直接使用排名第一的真实制度来源和证据，没有制度依据时只生成“转人工核实”回复。
+- `OpenAICompatibleGenerator` 已装配火山方舟 OpenAI 兼容 Chat API。启用豆包时限制输出长度并关闭深度思考，以降低顾问回复的等待时间和费用。
 - 若后续 API 不是 OpenAI 兼容协议，只需新增一个实现 `Generator` 的适配器。
 
-仓库没有安装 OpenAI 或豆包 SDK，也不读取真实密钥。事实依据由应用直接绑定本地 `SearchResult`，不会采信模型生成的引用；风险等级也始终由本地确定性规则覆盖模型输出。
+程序通过 `python-dotenv` 读取本机 `.env`，通过 OpenAI SDK 调用方舟；真实密钥不会进入 Git。事实依据由应用直接绑定本地 `SearchResult`，不会采信模型生成的引用；风险等级也始终由本地确定性规则覆盖模型输出。
 
 执行一次主屏幕中央区域的纯内存截图烟测：
 
@@ -165,6 +189,7 @@ $env:PYTHONIOENCODING = 'utf-8'
 
 - 聊天截图不会写入磁盘，也没有截图历史记录。
 - 手动问题、OCR 对话和生成回复只保留在当前应用进程内，退出后不会写入磁盘。
+- 启用豆包后，OCR 校正对话和本次 Top 3 检索片段会发送给火山方舟生成建议；本机不落盘不等于数据不出本机，正式使用前需确认业务隐私与供应商数据处理要求。
 - `data/feedback.sqlite3` 仅保存建议 ID、有用状态、枚举原因和时间戳，表结构中没有聊天、问题或回复正文字段。
 - OCR 模型权重是可复用开发缓存，不包含用户截图。
 - 知识索引仅写入配置的本地 SQLite 文件；`policy` 与 `style_case` 检索在查询层强制隔离。
@@ -173,7 +198,7 @@ $env:PYTHONIOENCODING = 'utf-8'
 
 ## 已知限制
 
-- 默认 `SimulatedGenerator` 便于离线演示，不等同于已接入真实豆包模型；仓库只提供 OpenAI 兼容适配边界。
+- 豆包生成依赖网络、方舟服务可用性、账户额度和模型权限；失败时界面会显示生成错误，不会自动绕过风险规则。
 - OCR 过滤针对左右聊天气泡布局；中央消息、贴边消息、复杂引用卡片和特殊缩放可能需要人工校正或粘贴兜底。
 - 截图区域必须完整位于一个屏幕，不能跨屏拼接。
 - 知识正文和 SQLite 索引是本机数据，不随 Git 分发；换电脑后需要经审核导入并重建。

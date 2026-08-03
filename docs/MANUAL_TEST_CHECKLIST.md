@@ -25,6 +25,7 @@
 | E-03 | 执行 `.\.venv\python.exe -m lexiaodu --rebuild-knowledge` | 成功输出文档数和切片数，无未审核目录混入 |  |
 | E-04 | 执行 `$env:PYTHONIOENCODING='utf-8'; .\.venv\python.exe -B scripts\verify_day5_queries.py` | 四项均为 `[PASS]`，目标资料在 Top 3 |  |
 | E-05 | 首次启动后等待 OCR 预加载 | 无模型下载错误；缓存位于配置的 E 盘目录 |  |
+| E-06 | 执行 `.\.venv\python.exe -B scripts\verify_doubao.py` | 方舟鉴权、模型调用和 JSON 输出均通过；不得输出 Key 或生成正文 |  |
 
 ## 完整流程
 

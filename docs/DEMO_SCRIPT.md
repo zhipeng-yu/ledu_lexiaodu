@@ -9,10 +9,11 @@
 ```powershell
 $env:PYTHONIOENCODING = 'utf-8'
 .\.venv\python.exe -B scripts\verify_day5_queries.py
+.\.venv\python.exe -B scripts\verify_doubao.py
 .\.venv\python.exe -m lexiaodu
 ```
 
-预期四个固定查询均显示 `[PASS]`，目标资料排名不超过 3；随后屏幕顶部出现“乐小读”悬浮工具条。
+预期四个固定查询均显示 `[PASS]`，目标资料排名不超过 3；豆包鉴权、模型调用和 JSON 输出也显示 `[PASS]`，随后屏幕顶部出现“乐小读”悬浮工具条。真实豆包预检会产生少量 Token 费用。
 
 ## 1:00–2:00 截图、OCR 与粘贴校正
 

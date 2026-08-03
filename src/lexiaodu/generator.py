@@ -118,18 +118,36 @@ def _response_content(response: Any) -> str:
 class OpenAICompatibleGenerator:
     """Generator adapter for clients exposing client.chat.completions.create."""
 
-    def __init__(self, client: Any, model: str) -> None:
+    def __init__(
+        self,
+        client: Any,
+        model: str,
+        *,
+        max_tokens: int | None = None,
+        extra_body: dict[str, Any] | None = None,
+    ) -> None:
         if not model.strip():
             raise ValueError("模型名称不能为空")
+        if max_tokens is not None and max_tokens < 1:
+            raise ValueError("max_tokens 必须大于 0")
         self._client = client
         self._model = model
+        self._max_tokens = max_tokens
+        self._extra_body = dict(extra_body) if extra_body else None
 
     def generate(self, request: GenerationRequest) -> SuggestionDraft:
         try:
+            options: dict[str, Any] = {
+                "model": self._model,
+                "messages": build_openai_messages(request),
+                "response_format": {"type": "json_object"},
+            }
+            if self._max_tokens is not None:
+                options["max_tokens"] = self._max_tokens
+            if self._extra_body is not None:
+                options["extra_body"] = self._extra_body
             response = self._client.chat.completions.create(
-                model=self._model,
-                messages=build_openai_messages(request),
-                response_format={"type": "json_object"},
+                **options,
             )
             payload = json.loads(_response_content(response))
             return SuggestionDraft(
