@@ -8,9 +8,10 @@
 - 完整自动化验收覆盖截图、OCR 校正与粘贴、真实检索、建议、高风险确认、编辑复制和结构化反馈。
 - 隐私验收确认截图流程不新增文件，日志和反馈库均不包含测试聊天正文或编辑后回复；反馈表仍只有五个元数据字段。
 - 四组固定查询的目标资料均在当前正式索引排名第 1；可用 `scripts/verify_day5_queries.py` 重复验证。
-- 已通过 `.env` 装配火山方舟 OpenAI 兼容接口；`scripts/verify_doubao.py` 使用虚构内容验证真实鉴权、`doubao-seed-2-0-lite-260215` 和 JSON 结构化输出，关闭深度思考后实测 9.25 秒。
+- 已通过 `.env` 装配火山方舟 OpenAI 兼容接口；`scripts/verify_doubao.py` 使用虚构内容验证真实鉴权、`doubao-seed-2-0-lite-260215` 和 JSON 结构化输出，关闭深度思考后推送前复测 8.81 秒。
+- AI 问答输入框兼容中文输入法组合态：拼音组词期间隐藏占位文字，提交或取消组合后恢复，避免占位提示与候选文字重叠。
 - README、安装运行说明、五分钟演示脚本、指定电脑手动清单、顾问试用表和验收结果已经补齐。
-- 最终代码验证为 86 tests passed，Python 编译和依赖检查通过，Qt 当前会话内存截图烟测通过。
+- 最终代码验证为 87 tests passed，Python 编译和依赖检查通过，Qt 当前会话内存截图烟测通过。
 - 启用豆包时，OCR 校正对话和本次 Top 3 片段会发送给火山方舟；Key 只存在被 Git 忽略的本机 `.env`，但正式使用前仍需确认外部数据处理要求。
 - 最终指定演示电脑的真实聊天 OCR、DPI 缩放和剪贴板肉眼验证，以及真实顾问试用，仍须按 `docs/MANUAL_TEST_CHECKLIST.md` 和 `docs/ADVISOR_TRIAL_FORM.md` 执行。
 
@@ -62,13 +63,15 @@
 - 建议任务的同步提交错误会直接显示在结果窗口和悬浮工具条，不再静默等待。
 - 知识索引缺失或检索失败时，工作台和悬浮工具条都会显示明确错误状态。
 
-### 可替换 Generator 与豆包兼容准备
+### 可替换 Generator 与真实豆包接入
 
 - `Generator` 是厂商无关的 Protocol，统一输入 `GenerationRequest`，输出 `SuggestionDraft`。
-- `OpenAICompatibleGenerator` 接受注入的 client 和 model，调用 `client.chat.completions.create(...)` 并要求 JSON 对象响应。
-- 当前计划接入豆包时，只需在应用装配层提供配置好 base URL、密钥和模型的 OpenAI 兼容 client。
+- `OpenAICompatibleGenerator` 接受注入的 client、model、token 上限和额外请求参数，调用 `client.chat.completions.create(...)` 并要求 JSON 对象响应。
+- 应用从本机 `.env` 读取 `LEXIAODU_GENERATOR`、`ARK_BASE_URL`、`ARK_MODEL` 和 `ARK_API_KEY`；选择 `doubao` 时装配火山方舟 OpenAI 兼容 client，选择 `simulated` 或未配置时使用本地生成器。
+- 豆包装配会校验 Key 非空且仅含 ASCII、模型非空和 HTTPS base URL；远端调用失败时明确报错，不静默回退到模拟建议。
+- `scripts/verify_doubao.py` 复用正式应用装配链路，以虚构内容完成真实鉴权、模型调用和 JSON 结构验证，不输出 Key 或生成正文。
 - 更换其他 OpenAI 兼容服务不影响检索、风险、反馈和 UI；非兼容协议可新增 Generator 适配器。
-- 当前仓库仍不要求真实 API，不安装厂商 SDK，不读取或提交 API Key。
+- `openai` 和 `python-dotenv` 已作为项目依赖；真实 Key 只保存在被 Git 忽略的 `.env`，仓库仅提交 `.env.example`。
 
 ### 完整顾问建议工作台
 
@@ -79,6 +82,7 @@
   - 风险等级及逐条风险提示；
   - 明确的转人工状态。
 - 工作台保留底部输入区、Enter 发送、Shift+Enter 换行、多轮记录和关闭后重新打开的进程内历史。
+- 中文输入法处于拼音组合态时，输入框暂时隐藏占位提示，组合完成或取消后恢复，不影响 Enter 和 Shift+Enter 行为。
 - 悬浮工具条“AI 问答”继续打开带输入框的手动提问窗口。
 - 截图 OCR 校正确认后打开独立的“顾问建议”结果窗口，隐藏提问框并直接展示生成状态和后续建议，不会跳入手动 AI 问答流程。
 - 保留 `append_ai_response(text)` 作为旧纯文本调用的兼容入口。
@@ -122,7 +126,7 @@
 - `src/lexiaodu/feedback.py`：隐私安全的反馈数据模型和 SQLite 存储。
 - `src/lexiaodu/chat.py`：完整建议卡、编辑、复制门控和反馈交互。
 - `src/lexiaodu/workflow.py`：手动问题/OCR 到建议工作台的后台链路。
-- `src/lexiaodu/app.py`：默认本地服务装配。
+- `src/lexiaodu/app.py`：本地模拟或真实豆包生成器的环境配置、校验和服务装配。
 - `src/lexiaodu/knowledge_import.py`：DOCX/XLSX/PDF增量提取、OCR协调、来源状态、链接图、审核和应用事务。
 - `src/lexiaodu/ocr.py`：聊天OCR与不使用聊天布局过滤的文档OCR模式。
 - `src/lexiaodu/knowledge.py`：分类BM25检索；文档名、章节和正文共同参与排序。
@@ -135,24 +139,30 @@
 
 ```powershell
 .\.venv\python.exe -B -m pytest -q -p no:cacheprovider --basetemp artifacts\pytest-final-push
-.\.venv\python.exe -m compileall -q src tests
+.\.venv\python.exe -m compileall -q src tests scripts
 .\.venv\python.exe -m pip check
+$env:PYTHONIOENCODING = 'utf-8'
+.\.venv\python.exe -B scripts\verify_day5_queries.py
+.\.venv\python.exe -B scripts\verify_doubao.py
 .\.venv\python.exe -B -m lexiaodu --knowledge-link-report
 git diff --check
 ```
 
 2026-08-03 最终结果：
 
-- 完整测试：77 tests passed。
+- 完整测试：87 tests passed。
 - Python 编译检查：通过。
 - 依赖一致性：`No broken requirements found`。
+- 四组固定查询全部通过，目标资料均排名第 1。
+- 真实豆包鉴权、指定模型调用和 JSON 结构化输出通过；本次耗时 8.81 秒，虚构测试内容的顾虑摘要与微信回复均非空。
 - 真实链接报告：96次引用、89个唯一资料、5个已入库、84个未入库。
 - 差异空白检查：通过；仅有 Git 的 LF/CRLF 工作区提示。
 - 截图选区定时测试为80ms产品延迟保留250ms测试等待窗口，避免Windows定时调度抖动；产品行为未改变。
 
 ## 已知边界与后续工作
 
-- 豆包真实 client、base URL、模型和密钥尚未装配；当前只完成可替换接口和 OpenAI 兼容适配器。
+- 豆包生成依赖网络、方舟服务可用性、账户额度和模型权限；失败时显示生成错误，不会自动绕过本地风险规则。
+- 启用豆包会把本次 OCR 校正对话和 Top 3 检索片段发送给火山方舟；正式使用前仍需确认供应商数据处理要求。
 - 风险规则是保守的确定性关键词规则；新业务风险类型需要显式补规则和测试。
 - 通过审核导入命令应用知识时会自动重建索引；直接手工编辑 `knowledge/` 后仍需执行 `--rebuild-knowledge`。
 - 增量来源导入支持扫描PDF OCR；直接把扫描PDF放入正式 `knowledge/` 仍不能由基础索引器OCR。

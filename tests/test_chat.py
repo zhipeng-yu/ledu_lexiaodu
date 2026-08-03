@@ -3,7 +3,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtGui import QGuiApplication, QInputMethodEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
@@ -128,6 +128,28 @@ def test_enter_sends_and_shift_enter_inserts_a_line_break() -> None:
 
     QTest.keyClick(chat_input, Qt.Key.Key_Return)
     assert submitted == ["第一行\n第二行"]
+    dialog.close()
+
+
+def test_placeholder_is_hidden_while_ime_text_is_being_composed() -> None:
+    application = QApplication.instance() or QApplication([])
+    dialog = AiChatDialog()
+    chat_input = dialog.findChild(QPlainTextEdit, "chatInput")
+
+    assert chat_input is not None
+    placeholder = chat_input.placeholderText()
+    assert placeholder
+
+    QApplication.sendEvent(chat_input, QInputMethodEvent("zhongwen", []))
+    assert chat_input.toPlainText() == ""
+    assert chat_input.placeholderText() == ""
+
+    commit = QInputMethodEvent()
+    commit.setCommitString("中文")
+    QApplication.sendEvent(chat_input, commit)
+    assert chat_input.toPlainText() == "中文"
+    assert chat_input.placeholderText() == placeholder
+    assert application is not None
     dialog.close()
 
 

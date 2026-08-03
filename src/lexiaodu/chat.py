@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from PySide6.QtCore import Qt, QTimer, Signal, Slot
-from PySide6.QtGui import QGuiApplication, QKeyEvent
+from PySide6.QtGui import QGuiApplication, QInputMethodEvent, QKeyEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -45,6 +45,21 @@ class ChatMessage:
 
 class _ChatInput(QPlainTextEdit):
     submit_requested = Signal()
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._placeholder_before_composition: str | None = None
+
+    def inputMethodEvent(self, event: QInputMethodEvent) -> None:
+        if event.preeditString() and self._placeholder_before_composition is None:
+            self._placeholder_before_composition = self.placeholderText()
+            self.setPlaceholderText("")
+
+        super().inputMethodEvent(event)
+
+        if not event.preeditString() and self._placeholder_before_composition is not None:
+            self.setPlaceholderText(self._placeholder_before_composition)
+            self._placeholder_before_composition = None
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         is_enter = event.key() in (
