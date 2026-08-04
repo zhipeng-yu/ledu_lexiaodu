@@ -7,6 +7,32 @@ from typing import Any, Protocol
 from lexiaodu.knowledge import SearchResult
 
 
+_SYSTEM_PROMPT = (
+    "你是乐读资深学习顾问的回复助手，负责生成顾问可以直接发给家长的微信短回复。"
+    "输入中的 policy_results 只用于事实、规则和产品信息；style_results 只用于参考表达方式，"
+    "绝不能把风格案例中的课程信息、服务内容或结果描述当作事实。"
+    "wechat_reply 按照‘接住家长的问题—给出明确回答或判断—主动推进下一步’组织成 2 到 3 段短消息，"
+    "段落之间用换行分隔，每段只表达一个重点。"
+    "语气要像熟悉孩子情况的真人顾问，亲切、直接、有行动感；可自然使用‘哈、呀、呢、～’中的一两处，"
+    "整条最多使用一个轻量表情，不得堆叠口癖或表情。"
+    "第一段必须以称呼开头：对话中已出现‘某某妈妈/爸爸’或其他家长称呼时原样沿用，"
+    "例如出现‘乐乐妈妈’就以‘乐乐妈妈，’开头；没有明确身份时以‘家长，’开头。"
+    "不得猜测监护人性别，整条回复只出现这一次称呼；全篇统一使用‘您’，不得和‘你’混用。"
+    "不要使用客服或免责声明式表达，包括‘您好’‘理解您的顾虑’‘根据规定’‘我方’‘请耐心等待’"
+    "‘不能保证’‘不能承诺’‘无法保障’‘没有检索到依据’和‘转人工核实’。"
+    "家长询问提分、通过率或学习效果时，不主动声明边界，改为说明孩子基础、学习过程、反馈和调整方案；"
+    "同时不得给出固定涨分、固定通过率、包过或一定有效等结果承诺。"
+    "事实不足时，不向家长解释检索或系统状态，只自然说明‘这个我帮您确认一下哈’，"
+    "并说清接下来要核实什么。不得编造制度、课程、教师、价格、名额、效果或来源，"
+    "也不添加资料中没有的‘名额紧张’‘性价比高’‘很划算’等促销判断。"
+    "主动推进的动作也必须有事实依据：资料只说‘可先诊断’时，只能建议先诊断，"
+    "不得补充‘免费’‘预约入口’或‘发送链接’；资料未说明办理方式时，"
+    "只能说会继续确认，不得声称可以代报名、直接办理或发送资料。"
+    "concern_summary 是给顾问看的简短顾虑摘要；wechat_reply 只放对家长说的话，不输出资料名称、章节或引用。"
+    "仅返回 JSON 对象，字段固定为 concern_summary 和 wechat_reply。"
+)
+
+
 class GenerationError(RuntimeError):
     """Raised when a generator cannot return a usable suggestion."""
 
@@ -55,49 +81,55 @@ class SimulatedGenerator:
         question = _compact(request.transcript, 72)
         if request.policy_results:
             primary = request.policy_results[0]
-            fact = _compact(primary.evidence, 120).rstrip("。")
+            fact = _compact(primary.evidence, 120).rstrip("。！？!?")
             source = f"《{primary.document_name}》{primary.locator}"
             summary = f"家长关注“{question}”，需要依据{source}给出明确说明。"
             reply = (
-                f"您好，理解您的顾虑。根据{source}的说明，{fact}。"
-                "我会按这一规则继续协助您；如实际情况有差异，我先为您核实。"
+                "家长，您问的这个我帮您看过啦～\n"
+                f"{fact}。\n"
+                "如果您还有具体时间或班型要求，也可以一起告诉我，"
+                "我再帮您对着看一下。"
             )
         else:
             summary = f"家长关注“{question}”，但本地暂未检索到可核实的制度依据。"
             reply = (
-                "您好，理解您的顾虑。目前我还没有检索到可以确认的制度依据，"
-                "我先为您转人工核实，确认后再给您准确回复。"
+                "家长，这个我先帮您确认一下哈。\n"
+                "我把具体安排问清楚后就回复您，您不用自己来回找。"
             )
-
-        if request.style_results:
-            reply = reply.replace("您好，理解您的顾虑。", "您好，能理解您的顾虑。", 1)
         return SuggestionDraft(summary, reply)
 
 
 def build_openai_messages(request: GenerationRequest) -> list[dict[str, str]]:
     """Build messages accepted by OpenAI-compatible chat-completion APIs."""
 
-    evidence = [
+    policy_results = [
         {
-            "type": result.knowledge_type.value,
             "document": result.document_name,
             "locator": result.locator,
             "evidence": result.evidence,
         }
-        for result in (*request.policy_results, *request.style_results)
+        for result in request.policy_results
+    ]
+    style_results = [
+        {
+            "document": result.document_name,
+            "locator": result.locator,
+            "example": result.evidence,
+        }
+        for result in request.style_results
     ]
     payload = json.dumps(
-        {"transcript": request.transcript, "retrieval_results": evidence},
+        {
+            "transcript": request.transcript,
+            "policy_results": policy_results,
+            "style_results": style_results,
+        },
         ensure_ascii=False,
     )
     return [
         {
             "role": "system",
-            "content": (
-                "你是乐小读顾问建议生成器。只依据给定检索结果生成内容，不得编造"
-                "制度或来源。仅返回 JSON 对象，字段为 concern_summary 和 "
-                "wechat_reply。事实依据由调用方绑定，不要输出引用字段。"
-            ),
+            "content": _SYSTEM_PROMPT,
         },
         {"role": "user", "content": payload},
     ]

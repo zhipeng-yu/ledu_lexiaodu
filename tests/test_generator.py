@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,9 +10,32 @@ from lexiaodu.generator import (
     GenerationRequest,
     OpenAICompatibleGenerator,
     SimulatedGenerator,
+    build_openai_messages,
 )
 from lexiaodu.knowledge import KnowledgeBase, KnowledgeType, SearchResult
 from lexiaodu.risk import RiskLevel
+
+
+CUSTOMER_SERVICE_PHRASES = (
+    "您好",
+    "理解您的顾虑",
+    "根据规定",
+    "我方",
+    "请耐心等待",
+    "不能保证",
+    "不能承诺",
+    "无法保障",
+    "没有检索到依据",
+    "转人工核实",
+)
+
+
+def _reply_paragraphs(reply: str) -> list[str]:
+    return [
+        paragraph.strip()
+        for paragraph in reply.splitlines()
+        if paragraph.strip()
+    ]
 
 
 def _result(
@@ -44,7 +68,31 @@ def test_simulated_generator_uses_retrieved_policy_content() -> None:
 
     assert "请假制度.txt" in draft.concern_summary
     assert policy.evidence.rstrip("。") in draft.wechat_reply
-    assert "请假制度.txt" in draft.wechat_reply
+    assert "请假制度.txt" not in draft.wechat_reply
+    assert 2 <= len(_reply_paragraphs(draft.wechat_reply)) <= 3
+    assert draft.wechat_reply.count("家长") == 1
+    assert not any(
+        phrase in draft.wechat_reply for phrase in CUSTOMER_SERVICE_PHRASES
+    )
+
+
+def test_simulated_generator_handles_missing_policy_without_customer_service_copy(
+) -> None:
+    draft = SimulatedGenerator().generate(
+        GenerationRequest(
+            transcript="这个班下周几点开课？",
+            policy_results=(),
+            style_results=(),
+        )
+    )
+
+    assert _reply_paragraphs(draft.wechat_reply) == [
+        "家长，这个我先帮您确认一下哈。",
+        "我把具体安排问清楚后就回复您，您不用自己来回找。",
+    ]
+    assert not any(
+        phrase in draft.wechat_reply for phrase in CUSTOMER_SERVICE_PHRASES
+    )
 
 
 def test_simulated_generator_end_to_end_uses_real_knowledge_search(
@@ -110,6 +158,46 @@ def test_advice_service_retrieves_both_types_before_generation() -> None:
     assert suggestion.risk.level is not RiskLevel.HIGH
 
 
+def test_openai_messages_separate_policy_facts_from_style_examples() -> None:
+    policy = _result(KnowledgeType.POLICY, "课程规则.txt", "每周六上课。")
+    style = _result(
+        KnowledgeType.STYLE_CASE,
+        "顾问话术.txt",
+        "家长，这个我帮您看一下哈～",
+    )
+
+    messages = build_openai_messages(
+        GenerationRequest("周几上课？", (policy,), (style,))
+    )
+
+    assert [message["role"] for message in messages] == ["system", "user"]
+    system_prompt = messages[0]["content"]
+    assert "style_results 只用于参考表达方式" in system_prompt
+    assert "组织成 2 到 3 段短消息" in system_prompt
+    assert "不得猜测监护人性别" in system_prompt
+    assert "例如出现‘乐乐妈妈’就以‘乐乐妈妈，’开头" in system_prompt
+    assert "全篇统一使用‘您’" in system_prompt
+    assert "‘性价比高’" in system_prompt
+    assert "主动推进的动作也必须有事实依据" in system_prompt
+    assert "不得补充‘免费’‘预约入口’或‘发送链接’" in system_prompt
+    payload = json.loads(messages[1]["content"])
+    assert set(payload) == {"transcript", "policy_results", "style_results"}
+    assert payload["policy_results"] == [
+        {
+            "document": "课程规则.txt",
+            "locator": "办理规则",
+            "evidence": "每周六上课。",
+        }
+    ]
+    assert payload["style_results"] == [
+        {
+            "document": "顾问话术.txt",
+            "locator": "办理规则",
+            "example": "家长，这个我帮您看一下哈～",
+        }
+    ]
+
+
 def test_openai_compatible_generator_uses_injected_client_and_model() -> None:
     policy = _result(KnowledgeType.POLICY, "制度.txt", "需要提前申请。")
 
@@ -125,7 +213,8 @@ def test_openai_compatible_generator_uses_injected_client_and_model() -> None:
                         message=SimpleNamespace(
                             content=(
                                 '{"concern_summary":"家长关注请假",'
-                                '"wechat_reply":"您好，我来协助核实。"}'
+                                '"wechat_reply":"家长，这个我帮您看一下哈。\\n'
+                                '我确认好后回复您。"}'
                             )
                         )
                     )
@@ -147,7 +236,7 @@ def test_openai_compatible_generator_uses_injected_client_and_model() -> None:
     )
 
     assert draft.concern_summary == "家长关注请假"
-    assert draft.wechat_reply == "您好，我来协助核实。"
+    assert draft.wechat_reply == "家长，这个我帮您看一下哈。\n我确认好后回复您。"
     assert completions.arguments["model"] == "doubao-model"
     assert completions.arguments["response_format"] == {
         "type": "json_object"
@@ -156,9 +245,10 @@ def test_openai_compatible_generator_uses_injected_client_and_model() -> None:
     assert completions.arguments["extra_body"] == {
         "thinking": {"type": "disabled"}
     }
-    user_message = completions.arguments["messages"][1]["content"]
-    assert "需要提前申请" in user_message
-    assert "制度.txt" in user_message
+    user_payload = json.loads(completions.arguments["messages"][1]["content"])
+    assert user_payload["policy_results"][0]["evidence"] == "需要提前申请。"
+    assert user_payload["policy_results"][0]["document"] == "制度.txt"
+    assert user_payload["style_results"] == []
 
 
 def test_openai_compatible_generator_rejects_unstructured_response() -> None:
