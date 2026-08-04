@@ -19,11 +19,29 @@ from xml.etree import ElementTree
 from PySide6.QtCore import QSize
 from PySide6.QtGui import QImage
 
-from lexiaodu.knowledge import KnowledgeBase, KnowledgeError
-from lexiaodu.ocr import OcrError, PaddleOcrEngine
+from lexiaodu.knowledge import (
+    KnowledgeBase,
+    KnowledgeError,
+    SourceBlock,
+    chunk_block,
+    tokenize,
+)
+from lexiaodu.ocr import MIN_TEXT_CONFIDENCE, OcrError, PaddleOcrEngine
 
 
-SUPPORTED_SOURCE_SUFFIXES = {".docx", ".xlsx", ".pdf"}
+SUPPORTED_SOURCE_SUFFIXES = {
+    ".docx",
+    ".xlsx",
+    ".pptx",
+    ".pdf",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".webp",
+}
+LEGACY_SOURCE_SUFFIXES = {".doc", ".xls", ".ppt"}
+IMAGE_SOURCE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
+DEFAULT_EXCLUDED_SOURCE_PARTS = {"顾问聊天记录"}
 _URL_PATTERN = re.compile(r"https?://[^\s《》<>]+", re.IGNORECASE)
 _HEADING_PATTERN = re.compile(
     r"^(?:#{1,6}\s+|[一二三四五六七八九十百]+[、.．]|\d+[、.．)）])"
@@ -53,6 +71,8 @@ class ExtractedBlock:
     locator: str
     kind: str
     text: str
+    confidence: float | None = None
+    warning: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +101,27 @@ class LinkReport:
     missing_target_count: int
     internal_anchor_count: int
     by_type: dict[str, int]
+    archived_target_count: int = 0
+    advisor_target_count: int = 0
+    internal_only_target_count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class CoverageReport:
+    source_count: int
+    revision_count: int
+    block_count: int
+    text_char_count: int
+    searchable_char_count: int
+    advisor_block_count: int
+    internal_block_count: int
+    pending_block_count: int
+    no_text_block_count: int
+    failed_block_count: int
+    blocked_block_count: int
+    image_count: int
+    image_ocr_count: int
+    by_kind: dict[str, int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,36 +266,70 @@ class _OcrCoordinator:
     def __init__(
         self,
         engine: DocumentOcr | None,
-        cached: dict[str, tuple[str, str]],
+        cached: dict[str, tuple[str, str] | tuple[str, str, float | None]],
         *,
         skip_images: bool = False,
     ) -> None:
         self.engine = engine
-        self.cached = dict(cached)
-        self.pending: dict[str, tuple[str, str, int, int]] = {}
+        self.cached = {
+            digest: (
+                value[0],
+                value[1],
+                value[2] if len(value) > 2 else None,
+            )
+            for digest, value in cached.items()
+        }
+        self.pending: dict[
+            str, tuple[str, str, float | None, int, int]
+        ] = {}
         self.skip_images = skip_images
 
-    def recognize(self, data: bytes, label: str) -> tuple[str, str]:
+    def recognize(
+        self, data: bytes, label: str
+    ) -> tuple[str, str, float | None]:
         if self.skip_images:
-            return "", ""
+            return "", "", None
         digest = _bytes_hash(data)
         if digest in self.cached:
             return self.cached[digest]
         image = QImage.fromData(data)
         if image.isNull():
-            result = ("", f"{label}: 无法解码嵌入图片")
+            result = ("", f"{label}: 无法解码嵌入图片", None)
         elif image.width() < 80 or image.height() < 30:
-            result = ("", "")
+            result = ("", "", None)
         elif self.engine is None:
-            result = ("", f"{label}: 未启用 OCR，图片文字尚未提取")
+            result = (
+                "",
+                f"{label}: 未启用 OCR，图片文字尚未提取",
+                None,
+            )
         else:
             try:
                 lines = self.engine.recognize_document(image)
-                result = ("\n".join(line.text for line in lines), "")
+                confidences = [
+                    float(line.confidence)
+                    for line in lines
+                    if getattr(line, "confidence", None) is not None
+                ]
+                result = (
+                    "\n".join(line.text for line in lines),
+                    "",
+                    (
+                        sum(confidences) / len(confidences)
+                        if confidences
+                        else None
+                    ),
+                )
             except OcrError as exc:
-                result = ("", f"{label}: OCR 失败：{exc}")
+                result = ("", f"{label}: OCR 失败：{exc}", None)
         self.cached[digest] = result
-        self.pending[digest] = (result[0], result[1], image.width(), image.height())
+        self.pending[digest] = (
+            result[0],
+            result[1],
+            result[2],
+            image.width(),
+            image.height(),
+        )
         return result
 
 
@@ -332,17 +407,26 @@ def _docx_links_in_element(
 def extract_docx(path: Path, ocr: _OcrCoordinator) -> ExtractedSource:
     try:
         with zipfile.ZipFile(path) as archive:
+            names = set(archive.namelist())
             document = ElementTree.fromstring(archive.read("word/document.xml"))
             relationship_path = "word/_rels/document.xml.rels"
             relationships = (
                 _relationships(archive.read(relationship_path))
-                if relationship_path in archive.namelist()
+                if relationship_path in names
                 else {}
             )
             media = {
                 name: archive.read(name)
-                for name in archive.namelist()
+                for name in names
                 if name.startswith("word/media/")
+            }
+            extra_xml = {
+                name: archive.read(name)
+                for name in names
+                if re.fullmatch(
+                    r"word/(?:header|footer|footnotes|endnotes|comments)[^/]*\.xml",
+                    name,
+                )
             }
     except (OSError, KeyError, zipfile.BadZipFile, ElementTree.ParseError) as exc:
         raise KnowledgeImportError(f"DOCX 无法读取：{path}: {exc}") from exc
@@ -374,23 +458,6 @@ def extract_docx(path: Path, ocr: _OcrCoordinator) -> ExtractedSource:
                     paragraph, relationships, locator, text
                 )
             )
-        for blip in paragraph.findall(".//a:blip", _WORD_NS):
-            relation_id = blip.get(f"{{{_WORD_NS['r']}}}embed")
-            if not relation_id or relation_id not in relationships:
-                continue
-            target, _, relation_type = relationships[relation_id]
-            if relation_type != "image":
-                continue
-            media_path = str((Path("word") / target).as_posix())
-            data = media.get(media_path)
-            if data is None:
-                warnings.append(f"{locator}: 找不到嵌入图片 {target}")
-                continue
-            image_text, warning = ocr.recognize(data, f"{path.name}/{target}")
-            if image_text:
-                blocks.append(ExtractedBlock(locator, "image_ocr", image_text))
-            if warning:
-                warnings.append(warning)
 
     for child in body:
         local_name = child.tag.rsplit("}", 1)[-1]
@@ -414,24 +481,6 @@ def extract_docx(path: Path, ocr: _OcrCoordinator) -> ExtractedSource:
                                 value,
                             )
                         )
-                        for blip in paragraph.findall(".//a:blip", _WORD_NS):
-                            relation_id = blip.get(
-                                f"{{{_WORD_NS['r']}}}embed"
-                            )
-                            if not relation_id or relation_id not in relationships:
-                                continue
-                            target, _, relation_type = relationships[relation_id]
-                            media_path = str(
-                                (Path("word") / target).as_posix()
-                            )
-                            if relation_type == "image" and media_path in media:
-                                image_text, warning = ocr.recognize(
-                                    media[media_path], f"{path.name}/{target}"
-                                )
-                                if image_text:
-                                    cell_parts.append(f"[图片文字] {image_text}")
-                                if warning:
-                                    warnings.append(warning)
                     cells.append(" / ".join(cell_parts))
                 if any(cells):
                     rows.append(" | ".join(cells))
@@ -439,6 +488,89 @@ def extract_docx(path: Path, ocr: _OcrCoordinator) -> ExtractedSource:
                 blocks.append(
                     ExtractedBlock(locator, "table", "\n".join(rows))
                 )
+
+    part_labels = {
+        "header": "页眉",
+        "footer": "页脚",
+        "footnotes": "脚注",
+        "endnotes": "尾注",
+        "comments": "批注",
+    }
+    parsed_parts: list[tuple[str, ElementTree.Element]] = [
+        ("正文", document)
+    ]
+    for part_name, xml in sorted(extra_xml.items()):
+        stem = Path(part_name).stem
+        part_kind = next(
+            (key for key in part_labels if stem.startswith(key)), stem
+        )
+        label = f"{part_labels.get(part_kind, part_kind)} {stem}"
+        try:
+            root = ElementTree.fromstring(xml)
+        except ElementTree.ParseError as exc:
+            warnings.append(f"{label}: XML 无法解析：{exc}")
+            continue
+        parsed_parts.append((label, root))
+        text = _clean_text(
+            "".join(node.text or "" for node in root.findall(".//w:t", _WORD_NS))
+        )
+        if text:
+            blocks.append(ExtractedBlock(label, part_kind, text))
+            for match in _URL_PATTERN.finditer(text):
+                target_url = _extract_url(match.group())
+                canonical = canonicalize_url(target_url)
+                if canonical:
+                    links.append(
+                        LinkOccurrence(
+                            target_url,
+                            canonical,
+                            classify_link(canonical),
+                            target_url,
+                            label,
+                            text,
+                        )
+                    )
+
+    for part_label, root in parsed_parts:
+        alt_values: list[str] = []
+        for element in root.iter():
+            if element.tag.rsplit("}", 1)[-1] not in {"docPr", "cNvPr"}:
+                continue
+            for attribute in ("title", "descr"):
+                value = _clean_text(element.get(attribute, ""))
+                if value and value not in alt_values:
+                    alt_values.append(value)
+        if alt_values:
+            blocks.append(
+                ExtractedBlock(part_label, "alt_text", "\n".join(alt_values))
+            )
+        deleted = _clean_text(
+            "".join(
+                node.text or ""
+                for node in root.findall(".//w:delText", _WORD_NS)
+            )
+        )
+        if deleted:
+            blocks.append(
+                ExtractedBlock(part_label, "revision_deleted", deleted)
+            )
+
+    for media_name, data in sorted(media.items()):
+        image_text, warning, confidence = ocr.recognize(
+            data, f"{path.name}/{media_name}"
+        )
+        image_locator = f"嵌入图片 {Path(media_name).name}"
+        blocks.append(
+            ExtractedBlock(
+                image_locator,
+                "image_ocr" if image_text else "image_no_text",
+                f"[图片文字] {image_text}" if image_text else "",
+                confidence,
+                warning,
+            )
+        )
+        if warning:
+            warnings.append(warning)
 
     return ExtractedSource(
         title=path.stem,
@@ -474,10 +606,15 @@ def _xlsx_cell_value(
     return _clean_text(value), _clean_text(formula)
 
 
-def extract_xlsx(path: Path, _: _OcrCoordinator) -> ExtractedSource:
+def extract_xlsx(path: Path, ocr: _OcrCoordinator) -> ExtractedSource:
     try:
         with zipfile.ZipFile(path) as archive:
             names = set(archive.namelist())
+            media = {
+                name: archive.read(name)
+                for name in names
+                if name.startswith("xl/media/")
+            }
             workbook = ElementTree.fromstring(archive.read("xl/workbook.xml"))
             workbook_relationships = _relationships(
                 archive.read("xl/_rels/workbook.xml.rels")
@@ -505,6 +642,19 @@ def extract_xlsx(path: Path, _: _OcrCoordinator) -> ExtractedSource:
             blocks: list[ExtractedBlock] = []
             links: list[LinkOccurrence] = []
             warnings: list[str] = []
+            defined_names = [
+                f"{item.get('name', '')}={_clean_text(item.text or '')}"
+                for item in workbook.findall(".//x:definedNames/x:definedName", _SHEET_NS)
+                if _clean_text(item.text or "")
+            ]
+            if defined_names:
+                blocks.append(
+                    ExtractedBlock(
+                        "工作簿定义名称",
+                        "workbook_metadata",
+                        "\n".join(defined_names),
+                    )
+                )
             for sheet_name, sheet_path in sheets:
                 if sheet_path not in names:
                     warnings.append(f"工作表缺少 XML：{sheet_name}")
@@ -655,6 +805,21 @@ def extract_xlsx(path: Path, _: _OcrCoordinator) -> ExtractedSource:
                                 value,
                             )
                         )
+            for media_name, data in sorted(media.items()):
+                image_text, warning, confidence = ocr.recognize(
+                    data, f"{path.name}/{media_name}"
+                )
+                blocks.append(
+                    ExtractedBlock(
+                        f"嵌入图片 {Path(media_name).name}",
+                        "image_ocr" if image_text else "image_no_text",
+                        image_text,
+                        confidence,
+                        warning,
+                    )
+                )
+                if warning:
+                    warnings.append(warning)
     except (OSError, KeyError, zipfile.BadZipFile, ElementTree.ParseError) as exc:
         raise KnowledgeImportError(f"XLSX 无法读取：{path}: {exc}") from exc
 
@@ -663,6 +828,185 @@ def extract_xlsx(path: Path, _: _OcrCoordinator) -> ExtractedSource:
         blocks=tuple(blocks),
         links=_deduplicate_links(links),
         warnings=tuple(warnings),
+    )
+
+
+def _numbered_part_key(name: str) -> tuple[str, int, str]:
+    match = re.search(r"(\d+)(?=\.xml$)", name)
+    return (str(Path(name).parent), int(match.group(1)) if match else 0, name)
+
+
+def extract_pptx(path: Path, ocr: _OcrCoordinator) -> ExtractedSource:
+    drawing_ns = {
+        "a": "http://schemas.openxmlformats.org/drawingml/2006/main"
+    }
+    try:
+        with zipfile.ZipFile(path) as archive:
+            names = set(archive.namelist())
+            part_names = sorted(
+                (
+                    name
+                    for name in names
+                    if re.fullmatch(
+                        r"ppt/(?:slides/slide|notesSlides/notesSlide|comments/comment)\d+\.xml",
+                        name,
+                    )
+                ),
+                key=_numbered_part_key,
+            )
+            parts = {name: archive.read(name) for name in part_names}
+            relationships = {
+                name: archive.read(name)
+                for name in names
+                if name.startswith("ppt/") and name.endswith(".rels")
+            }
+            media = {
+                name: archive.read(name)
+                for name in names
+                if name.startswith("ppt/media/")
+            }
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise KnowledgeImportError(f"PPTX 无法读取：{path}: {exc}") from exc
+
+    blocks: list[ExtractedBlock] = []
+    links: list[LinkOccurrence] = []
+    warnings: list[str] = []
+    part_context: dict[str, str] = {}
+    for part_name, xml in parts.items():
+        if "/slides/" in part_name:
+            label = f"第 {_numbered_part_key(part_name)[1]} 页"
+            kind = "slide_text"
+        elif "/notesSlides/" in part_name:
+            label = f"第 {_numbered_part_key(part_name)[1]} 页备注"
+            kind = "slide_notes"
+        else:
+            label = f"第 {_numbered_part_key(part_name)[1]} 页批注"
+            kind = "slide_comment"
+        try:
+            root = ElementTree.fromstring(xml)
+        except ElementTree.ParseError as exc:
+            warnings.append(f"{label}: XML 无法解析：{exc}")
+            continue
+        text = _clean_text(
+            "\n".join(
+                node.text or "" for node in root.findall(".//a:t", drawing_ns)
+            )
+        )
+        part_context[part_name] = text
+        if text:
+            blocks.append(ExtractedBlock(label, kind, text))
+        alt_values: list[str] = []
+        for element in root.iter():
+            if element.tag.rsplit("}", 1)[-1] not in {"cNvPr", "docPr"}:
+                continue
+            for attribute in ("title", "descr"):
+                value = _clean_text(element.get(attribute, ""))
+                if value and value not in alt_values:
+                    alt_values.append(value)
+        if alt_values:
+            blocks.append(
+                ExtractedBlock(label, "alt_text", "\n".join(alt_values))
+            )
+        for match in _URL_PATTERN.finditer(text):
+            target_url = _extract_url(match.group())
+            canonical = canonicalize_url(target_url)
+            if canonical:
+                links.append(
+                    LinkOccurrence(
+                        target_url,
+                        canonical,
+                        classify_link(canonical),
+                        target_url,
+                        label,
+                        text,
+                    )
+                )
+
+    for relation_name, xml in relationships.items():
+        try:
+            relation_values = _relationships(xml).values()
+        except ElementTree.ParseError as exc:
+            warnings.append(f"{relation_name}: 关系文件无法解析：{exc}")
+            continue
+        related_part = relation_name.replace("/_rels/", "/").removesuffix(
+            ".rels"
+        )
+        context = part_context.get(related_part, "")
+        locator = (
+            f"第 {_numbered_part_key(related_part)[1]} 页"
+            if "/slide" in related_part
+            else Path(related_part).stem
+        )
+        for target, mode, relation_type in relation_values:
+            if relation_type != "hyperlink" and mode.casefold() != "external":
+                continue
+            target_url = _extract_url(target)
+            canonical = canonicalize_url(target)
+            if canonical:
+                links.append(
+                    LinkOccurrence(
+                        target_url,
+                        canonical,
+                        classify_link(canonical),
+                        target_url,
+                        locator,
+                        context,
+                    )
+                )
+
+    for media_name, data in sorted(media.items()):
+        image_text, warning, confidence = ocr.recognize(
+            data, f"{path.name}/{media_name}"
+        )
+        blocks.append(
+            ExtractedBlock(
+                f"嵌入图片 {Path(media_name).name}",
+                "image_ocr" if image_text else "image_no_text",
+                image_text,
+                confidence,
+                warning,
+            )
+        )
+        if warning:
+            warnings.append(warning)
+    return ExtractedSource(
+        title=path.stem,
+        blocks=tuple(blocks),
+        links=_deduplicate_links(links),
+        warnings=tuple(dict.fromkeys(warnings)),
+    )
+
+
+def extract_image(path: Path, ocr: _OcrCoordinator) -> ExtractedSource:
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise KnowledgeImportError(f"图片无法读取：{path}: {exc}") from exc
+    text, warning, confidence = ocr.recognize(data, path.name)
+    block = ExtractedBlock(
+        "整张图片",
+        "image_ocr" if text else "image_no_text",
+        text,
+        confidence,
+        warning,
+    )
+    return ExtractedSource(
+        title=path.stem,
+        blocks=(block,),
+        links=tuple(
+            LinkOccurrence(
+                target_url,
+                canonical,
+                classify_link(canonical),
+                target_url,
+                "整张图片",
+                text,
+            )
+            for match in _URL_PATTERN.finditer(text)
+            if (target_url := _extract_url(match.group()))
+            if (canonical := canonicalize_url(target_url))
+        ),
+        warnings=(warning,) if warning else (),
     )
 
 
@@ -691,6 +1035,17 @@ def extract_pdf(path: Path, ocr: _OcrCoordinator) -> ExtractedSource:
     blocks: list[ExtractedBlock] = []
     links: list[LinkOccurrence] = []
     warnings: list[str] = []
+    metadata = getattr(reader, "metadata", None)
+    if metadata:
+        metadata_text = "\n".join(
+            f"{str(key).lstrip('/')}: {_clean_text(str(value))}"
+            for key, value in metadata.items()
+            if value is not None and _clean_text(str(value))
+        )
+        if metadata_text:
+            blocks.append(
+                ExtractedBlock("文档属性", "pdf_metadata", metadata_text)
+            )
     for index, page in enumerate(reader.pages, start=1):
         locator = f"第 {index} 页"
         try:
@@ -705,14 +1060,65 @@ def extract_pdf(path: Path, ocr: _OcrCoordinator) -> ExtractedSource:
                 image = _render_pdf_page(path, index - 1)
                 lines = ocr.engine.recognize_document(image)
                 ocr_text = "\n".join(line.text for line in lines)
+                confidences = [
+                    float(line.confidence)
+                    for line in lines
+                    if getattr(line, "confidence", None) is not None
+                ]
+                confidence = (
+                    sum(confidences) / len(confidences)
+                    if confidences
+                    else None
+                )
                 if ocr_text:
-                    blocks.append(ExtractedBlock(locator, "pdf_ocr", ocr_text))
+                    blocks.append(
+                        ExtractedBlock(
+                            locator, "pdf_ocr", ocr_text, confidence
+                        )
+                    )
                 else:
-                    warnings.append(f"{locator}: 扫描页 OCR 未识别出文字")
+                    warning = f"{locator}: 扫描页 OCR 未识别出文字"
+                    warnings.append(warning)
+                    blocks.append(
+                        ExtractedBlock(
+                            locator, "pdf_no_text", "", None, warning
+                        )
+                    )
             except (KnowledgeImportError, OcrError) as exc:
-                warnings.append(f"{locator}: {exc}")
+                warning = f"{locator}: {exc}"
+                warnings.append(warning)
+                blocks.append(
+                    ExtractedBlock(
+                        locator, "pdf_no_text", "", None, warning
+                    )
+                )
         else:
-            warnings.append(f"{locator}: 页面无可提取文本且未启用 OCR")
+            warning = f"{locator}: 页面无可提取文本且未启用 OCR"
+            warnings.append(warning)
+            blocks.append(
+                ExtractedBlock(locator, "pdf_no_text", "", None, warning)
+            )
+        try:
+            page_images = list(getattr(page, "images", ()))
+        except Exception as exc:
+            page_images = []
+            warnings.append(f"{locator}: 页面图片枚举失败：{exc}")
+        for image_index, page_image in enumerate(page_images, start=1):
+            image_text, warning, confidence = ocr.recognize(
+                page_image.data,
+                f"{path.name}/{locator}/图片{image_index}",
+            )
+            blocks.append(
+                ExtractedBlock(
+                    f"{locator} 图片 {image_index}",
+                    "image_ocr" if image_text else "image_no_text",
+                    image_text,
+                    confidence,
+                    warning,
+                )
+            )
+            if warning:
+                warnings.append(warning)
         for match in _URL_PATTERN.finditer(text):
             target_url = _extract_url(match.group())
             canonical = canonicalize_url(target_url)
@@ -775,8 +1181,12 @@ def extract_source(path: Path, ocr: _OcrCoordinator) -> ExtractedSource:
         return extract_docx(path, ocr)
     if suffix == ".xlsx":
         return extract_xlsx(path, ocr)
+    if suffix == ".pptx":
+        return extract_pptx(path, ocr)
     if suffix == ".pdf":
         return extract_pdf(path, ocr)
+    if suffix in IMAGE_SOURCE_SUFFIXES:
+        return extract_image(path, ocr)
     raise KnowledgeImportError(f"不支持的来源格式：{path.suffix}")
 
 
@@ -915,8 +1325,71 @@ def _schema(connection: sqlite3.Connection) -> None:
             height INTEGER NOT NULL,
             recognized_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS source_revisions (
+            id INTEGER PRIMARY KEY,
+            source_id INTEGER NOT NULL
+                REFERENCES source_files(id) ON DELETE CASCADE,
+            sha256 TEXT NOT NULL,
+            batch_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            extracted_at TEXT NOT NULL,
+            approved_at TEXT,
+            warning_json TEXT NOT NULL DEFAULT '[]',
+            block_count INTEGER NOT NULL DEFAULT 0,
+            text_char_count INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(source_id, sha256)
+        );
+        CREATE INDEX IF NOT EXISTS source_revisions_source_status
+            ON source_revisions(source_id, status);
+        CREATE TABLE IF NOT EXISTS source_blocks (
+            id INTEGER PRIMARY KEY,
+            revision_id INTEGER NOT NULL
+                REFERENCES source_revisions(id) ON DELETE CASCADE,
+            block_index INTEGER NOT NULL,
+            block_key TEXT NOT NULL,
+            locator TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            text TEXT NOT NULL,
+            audience TEXT NOT NULL DEFAULT 'pending',
+            quality_status TEXT NOT NULL DEFAULT 'pending',
+            authority TEXT NOT NULL DEFAULT 'reference',
+            confidence REAL,
+            warning TEXT NOT NULL DEFAULT '',
+            UNIQUE(revision_id, block_index),
+            UNIQUE(revision_id, block_key)
+        );
+        CREATE INDEX IF NOT EXISTS source_blocks_revision
+            ON source_blocks(revision_id);
+        CREATE INDEX IF NOT EXISTS source_blocks_review
+            ON source_blocks(audience, quality_status);
+        CREATE TABLE IF NOT EXISTS source_chunks (
+            id INTEGER PRIMARY KEY,
+            block_id INTEGER NOT NULL
+                REFERENCES source_blocks(id) ON DELETE CASCADE,
+            chunk_index INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            UNIQUE(block_id, chunk_index)
+        );
+        CREATE INDEX IF NOT EXISTS source_chunks_block
+            ON source_chunks(block_id);
+        CREATE VIRTUAL TABLE IF NOT EXISTS source_chunks_fts USING fts5(
+            source_chunk_id UNINDEXED,
+            source_id UNINDEXED,
+            audience UNINDEXED,
+            document_name,
+            locator,
+            terms
+        );
         """
     )
+    cache_columns = {
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(image_ocr_cache)")
+    }
+    if "confidence" not in cache_columns:
+        connection.execute(
+            "ALTER TABLE image_ocr_cache ADD COLUMN confidence REAL"
+        )
 
 
 def _current_link_report(connection: sqlite3.Connection) -> LinkReport:
@@ -939,7 +1412,7 @@ def _current_link_report(connection: sqlite3.Connection) -> LinkReport:
         WHERE source.review_status <> 'missing' AND {external_filter}
         """
     ).fetchone()[0]
-    ingested_target_count = connection.execute(
+    archived_target_count = connection.execute(
         f"""
         SELECT COUNT(DISTINCT edge.target_id)
         FROM source_link_edges AS edge
@@ -950,9 +1423,45 @@ def _current_link_report(connection: sqlite3.Connection) -> LinkReport:
         WHERE source.review_status <> 'missing'
           AND {external_filter}
           AND target_source.approved_sha256 IS NOT NULL
-          AND EXISTS (
-              SELECT 1 FROM source_outputs AS output
-              WHERE output.source_id = target_source.id
+          AND (
+            EXISTS (
+                SELECT 1 FROM source_outputs AS output
+                WHERE output.source_id = target_source.id
+            )
+            OR EXISTS (
+                SELECT 1 FROM source_revisions AS revision
+                WHERE revision.source_id = target_source.id
+                  AND revision.status = 'approved'
+            )
+          )
+        """
+    ).fetchone()[0]
+    advisor_target_count = connection.execute(
+        f"""
+        SELECT COUNT(DISTINCT edge.target_id)
+        FROM source_link_edges AS edge
+        JOIN source_files AS source ON source.id = edge.source_id
+        JOIN link_targets AS lt ON lt.id = edge.target_id
+        JOIN source_aliases AS alias ON alias.canonical_key = lt.canonical_key
+        JOIN source_files AS target_source ON target_source.id = alias.source_id
+        WHERE source.review_status <> 'missing'
+          AND {external_filter}
+          AND target_source.approved_sha256 IS NOT NULL
+          AND (
+            EXISTS (
+                SELECT 1 FROM source_outputs AS output
+                WHERE output.source_id = target_source.id
+            )
+            OR EXISTS (
+                SELECT 1
+                FROM source_revisions AS revision
+                JOIN source_blocks AS block
+                  ON block.revision_id = revision.id
+                WHERE revision.source_id = target_source.id
+                  AND revision.status = 'approved'
+                  AND block.audience = 'advisor'
+                  AND block.quality_status = 'approved'
+            )
           )
         """
     ).fetchone()[0]
@@ -983,10 +1492,15 @@ def _current_link_report(connection: sqlite3.Connection) -> LinkReport:
     return LinkReport(
         occurrence_count=int(occurrence_count),
         unique_target_count=int(unique_target_count),
-        ingested_target_count=int(ingested_target_count),
-        missing_target_count=int(unique_target_count - ingested_target_count),
+        ingested_target_count=int(archived_target_count),
+        missing_target_count=int(unique_target_count - archived_target_count),
         internal_anchor_count=int(internal_anchor_count),
         by_type={str(key): int(value) for key, value in by_type.items()},
+        archived_target_count=int(archived_target_count),
+        advisor_target_count=int(advisor_target_count),
+        internal_only_target_count=int(
+            archived_target_count - advisor_target_count
+        ),
     )
 
 
@@ -1016,10 +1530,17 @@ def _current_missing_links(
                     ON target_source.id = alias.source_id
                   WHERE alias.canonical_key = lt.canonical_key
                     AND target_source.approved_sha256 IS NOT NULL
-                    AND EXISTS (
-                      SELECT 1 FROM source_outputs AS output
-                      WHERE output.source_id = target_source.id
-                  )
+                    AND (
+                      EXISTS (
+                        SELECT 1 FROM source_outputs AS output
+                        WHERE output.source_id = target_source.id
+                      )
+                      OR EXISTS (
+                        SELECT 1 FROM source_revisions AS revision
+                        WHERE revision.source_id = target_source.id
+                          AND revision.status = 'approved'
+                      )
+                    )
               )
             GROUP BY lt.id
             ORDER BY lt.target_type, lt.target_url
@@ -1150,16 +1671,341 @@ def _replace_source_links(
 def _store_ocr_pending(
     connection: sqlite3.Connection, ocr: _OcrCoordinator
 ) -> None:
-    for digest, (text, warning, width, height) in ocr.pending.items():
+    for digest, (text, warning, confidence, width, height) in ocr.pending.items():
         connection.execute(
             """
             INSERT OR REPLACE INTO image_ocr_cache (
-                sha256, text, warning, width, height, recognized_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                sha256, text, warning, width, height, recognized_at,
+                confidence
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (digest, text, warning, width, height, _utc_now()),
+            (
+                digest,
+                text,
+                warning,
+                width,
+                height,
+                _utc_now(),
+                confidence,
+            ),
         )
     ocr.pending.clear()
+
+
+def _block_key(index: int, block: ExtractedBlock) -> str:
+    identity = f"{index}\0{block.locator}\0{block.kind}".encode("utf-8")
+    return _bytes_hash(identity)
+
+
+def _store_source_revision(
+    connection: sqlite3.Connection,
+    source_id: int,
+    sha256: str,
+    batch_id: str,
+    extracted: ExtractedSource,
+) -> int:
+    existing = connection.execute(
+        """
+        SELECT id, status FROM source_revisions
+        WHERE source_id = ? AND sha256 = ?
+        """,
+        (source_id, sha256),
+    ).fetchone()
+    if existing is not None and existing["status"] == "approved":
+        return int(existing["id"])
+    if existing is None:
+        cursor = connection.execute(
+            """
+            INSERT INTO source_revisions (
+                source_id, sha256, batch_id, status, extracted_at,
+                warning_json, block_count, text_char_count
+            ) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?)
+            """,
+            (
+                source_id,
+                sha256,
+                batch_id,
+                _utc_now(),
+                json.dumps(extracted.warnings, ensure_ascii=False),
+                len(extracted.blocks),
+                sum(len(block.text) for block in extracted.blocks),
+            ),
+        )
+        revision_id = int(cursor.lastrowid)
+    else:
+        revision_id = int(existing["id"])
+        connection.execute(
+            """
+            UPDATE source_revisions
+            SET batch_id = ?, status = 'pending', extracted_at = ?,
+                approved_at = NULL, warning_json = ?, block_count = ?,
+                text_char_count = ?
+            WHERE id = ?
+            """,
+            (
+                batch_id,
+                _utc_now(),
+                json.dumps(extracted.warnings, ensure_ascii=False),
+                len(extracted.blocks),
+                sum(len(block.text) for block in extracted.blocks),
+                revision_id,
+            ),
+        )
+        connection.execute(
+            "DELETE FROM source_blocks WHERE revision_id = ?",
+            (revision_id,),
+        )
+    for index, block in enumerate(extracted.blocks):
+        if (
+            block.text
+            and block.confidence is not None
+            and block.confidence < MIN_TEXT_CONFIDENCE
+        ):
+            quality = "blocked"
+        elif block.text:
+            quality = "pending"
+        elif block.warning:
+            quality = "failed"
+        else:
+            quality = "no_text"
+        cursor = connection.execute(
+            """
+            INSERT INTO source_blocks (
+                revision_id, block_index, block_key, locator, kind, text,
+                audience, quality_status, authority, confidence, warning
+            ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, 'reference', ?, ?)
+            """,
+            (
+                revision_id,
+                index,
+                _block_key(index, block),
+                block.locator,
+                block.kind,
+                block.text,
+                quality,
+                block.confidence,
+                block.warning,
+            ),
+        )
+        block_id = int(cursor.lastrowid)
+        if not block.text:
+            continue
+        searchable_text = _URL_PATTERN.sub("[链接]", block.text)
+        chunks = chunk_block(SourceBlock(block.locator, searchable_text))
+        connection.executemany(
+            """
+            INSERT INTO source_chunks (block_id, chunk_index, text)
+            VALUES (?, ?, ?)
+            """,
+            (
+                (block_id, chunk_index, chunk.text)
+                for chunk_index, chunk in enumerate(chunks)
+            ),
+        )
+    return revision_id
+
+
+def _apply_source_review(
+    connection: sqlite3.Connection,
+    revision_id: int,
+    decision: dict[str, Any],
+) -> None:
+    raw = decision.get("raw", {})
+    if not isinstance(raw, dict):
+        raise KnowledgeImportError("原文审核配置必须是对象")
+    status = str(raw.get("status", "")).strip()
+    if status == "deferred":
+        return
+    if status != "approved":
+        raise KnowledgeImportError("原文必须标记为 approved 或 deferred")
+    audience = str(raw.get("audience", "")).strip()
+    if audience not in {"advisor", "internal"}:
+        raise KnowledgeImportError("原文受众必须是 advisor 或 internal")
+    authority = str(raw.get("authority", "reference")).strip()
+    if authority not in {"primary", "reference"}:
+        raise KnowledgeImportError("原文权威等级必须是 primary 或 reference")
+    internal_locators = {
+        str(value) for value in raw.get("internal_locators", [])
+    }
+    overrides = raw.get("block_overrides", {})
+    if not isinstance(overrides, dict):
+        raise KnowledgeImportError("原文块覆盖配置必须是对象")
+    rows = connection.execute(
+        """
+        SELECT id, block_key, locator, kind, text, quality_status
+        FROM source_blocks WHERE revision_id = ?
+        """,
+        (revision_id,),
+    ).fetchall()
+    for row in rows:
+        block_audience = (
+            "internal"
+            if row["locator"] in internal_locators
+            or row["kind"] == "revision_deleted"
+            else audience
+        )
+        quality = row["quality_status"]
+        if row["text"] and quality == "pending":
+            quality = "approved"
+        override = overrides.get(row["block_key"], {})
+        if override:
+            if not isinstance(override, dict):
+                raise KnowledgeImportError("原文块覆盖值必须是对象")
+            block_audience = str(
+                override.get("audience", block_audience)
+            )
+            quality = str(override.get("quality_status", quality))
+        if block_audience not in {"advisor", "internal"}:
+            raise KnowledgeImportError("原文块受众无效")
+        if quality not in {"approved", "no_text", "failed", "blocked"}:
+            raise KnowledgeImportError("原文块质量状态无效")
+        connection.execute(
+            """
+            UPDATE source_blocks
+            SET audience = ?, quality_status = ?, authority = ?
+            WHERE id = ?
+            """,
+            (block_audience, quality, authority, row["id"]),
+        )
+    source_id = connection.execute(
+        "SELECT source_id FROM source_revisions WHERE id = ?",
+        (revision_id,),
+    ).fetchone()[0]
+    connection.execute(
+        """
+        UPDATE source_revisions SET status = 'superseded'
+        WHERE source_id = ? AND status = 'approved' AND id <> ?
+        """,
+        (source_id, revision_id),
+    )
+    connection.execute(
+        """
+        UPDATE source_revisions
+        SET status = 'approved', approved_at = ? WHERE id = ?
+        """,
+        (_utc_now(), revision_id),
+    )
+
+
+def _rebuild_source_fts(connection: sqlite3.Connection) -> None:
+    connection.execute("DELETE FROM source_chunks_fts")
+    rows = connection.execute(
+        """
+        SELECT chunk.id AS chunk_id, revision.source_id,
+               block.audience, source.name, block.locator, chunk.text
+        FROM source_chunks AS chunk
+        JOIN source_blocks AS block ON block.id = chunk.block_id
+        JOIN source_revisions AS revision ON revision.id = block.revision_id
+        JOIN source_files AS source ON source.id = revision.source_id
+        WHERE revision.status = 'approved'
+          AND block.quality_status = 'approved'
+          AND block.audience IN ('advisor', 'internal')
+        ORDER BY chunk.id
+        """
+    ).fetchall()
+    connection.executemany(
+        """
+        INSERT INTO source_chunks_fts (
+            source_chunk_id, source_id, audience,
+            document_name, locator, terms
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            (
+                row["chunk_id"],
+                row["source_id"],
+                row["audience"],
+                " ".join(tokenize(row["name"])),
+                " ".join(tokenize(row["locator"])),
+                " ".join(tokenize(row["text"])),
+            )
+            for row in rows
+        ),
+    )
+
+
+def _coverage_report(connection: sqlite3.Connection) -> CoverageReport:
+    row = connection.execute(
+        """
+        SELECT
+          COUNT(DISTINCT source.id) AS source_count,
+          COUNT(DISTINCT revision.id) AS revision_count,
+          COUNT(DISTINCT block.id) AS block_count,
+          COALESCE(SUM(LENGTH(block.text)), 0) AS text_chars,
+          COALESCE(SUM(CASE WHEN revision.status = 'approved'
+                            AND block.audience = 'advisor'
+                            AND block.quality_status = 'approved'
+                       THEN LENGTH(block.text) ELSE 0 END), 0) AS searchable_chars,
+          COUNT(DISTINCT CASE WHEN block.audience = 'advisor' THEN block.id END) AS advisor_blocks,
+          COUNT(DISTINCT CASE WHEN block.audience = 'internal' THEN block.id END) AS internal_blocks,
+          COUNT(DISTINCT CASE WHEN block.audience = 'pending' THEN block.id END) AS pending_blocks,
+          COUNT(DISTINCT CASE WHEN block.quality_status = 'no_text' THEN block.id END) AS no_text_blocks,
+          COUNT(DISTINCT CASE WHEN block.quality_status = 'failed' THEN block.id END) AS failed_blocks,
+          COUNT(DISTINCT CASE WHEN block.quality_status = 'blocked' THEN block.id END) AS blocked_blocks,
+          COUNT(DISTINCT CASE WHEN block.kind IN ('image_ocr', 'image_no_text') THEN block.id END) AS image_count,
+          COUNT(DISTINCT CASE WHEN block.kind = 'image_ocr' THEN block.id END) AS image_ocr_count
+        FROM source_files AS source
+        LEFT JOIN source_revisions AS revision
+          ON revision.source_id = source.id
+         AND revision.status IN ('approved', 'pending')
+        LEFT JOIN source_blocks AS block ON block.revision_id = revision.id
+        """
+    ).fetchone()
+    by_kind = dict(
+        connection.execute(
+            """
+            SELECT block.kind, COUNT(*)
+            FROM source_blocks AS block
+            JOIN source_revisions AS revision ON revision.id = block.revision_id
+            WHERE revision.status IN ('approved', 'pending')
+            GROUP BY block.kind ORDER BY block.kind
+            """
+        ).fetchall()
+    )
+    return CoverageReport(
+        source_count=int(row["source_count"]),
+        revision_count=int(row["revision_count"]),
+        block_count=int(row["block_count"]),
+        text_char_count=int(row["text_chars"]),
+        searchable_char_count=int(row["searchable_chars"]),
+        advisor_block_count=int(row["advisor_blocks"]),
+        internal_block_count=int(row["internal_blocks"]),
+        pending_block_count=int(row["pending_blocks"]),
+        no_text_block_count=int(row["no_text_blocks"]),
+        failed_block_count=int(row["failed_blocks"]),
+        blocked_block_count=int(row["blocked_blocks"]),
+        image_count=int(row["image_count"]),
+        image_ocr_count=int(row["image_ocr_count"]),
+        by_kind={str(key): int(value) for key, value in by_kind.items()},
+    )
+
+
+def _current_quality_issues(
+    connection: sqlite3.Connection,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "source": str(row["source"]),
+            "locator": str(row["locator"]),
+            "kind": str(row["kind"]),
+            "quality_status": str(row["quality_status"]),
+            "warning": str(row["warning"] or ""),
+            "preview": str(row["text"])[:160],
+        }
+        for row in connection.execute(
+            """
+            SELECT source.name AS source, block.locator, block.kind,
+                   block.quality_status, block.warning, block.text
+            FROM source_blocks AS block
+            JOIN source_revisions AS revision
+              ON revision.id = block.revision_id
+            JOIN source_files AS source ON source.id = revision.source_id
+            WHERE revision.status IN ('approved', 'pending')
+              AND block.quality_status IN ('blocked', 'failed')
+            ORDER BY source.name, block.block_index
+            """
+        )
+    ]
 
 
 def _write_report(
@@ -1168,6 +2014,7 @@ def _write_report(
     link_report: LinkReport,
 ) -> None:
     summary = batch["summary"]
+    coverage = batch.get("coverage_report", {})
     lines = [
         f"# 知识导入审核报告：{batch['batch_id']}",
         "",
@@ -1178,30 +2025,84 @@ def _write_report(
         f"- 未变化：{summary['unchanged']} 个",
         f"- 来源缺失：{summary['missing']} 个",
         f"- 提取失败：{summary['failed']} 个",
+        f"- 需转换旧格式：{len(batch.get('unsupported_files', []))} 个",
         "",
-        "## 引用资料",
+        "## 原文覆盖",
         "",
-        f"- 引用次数：{link_report.occurrence_count}",
-        f"- 唯一资料：{link_report.unique_target_count}",
-        f"- 已入库资料：{link_report.ingested_target_count}",
-        f"- 未入库资料：{link_report.missing_target_count}",
-        f"- 内部锚点：{link_report.internal_anchor_count}",
-        "- 类型："
-        + "，".join(
-            f"{kind}={count}" for kind, count in link_report.by_type.items()
-        ),
+        f"- 来源：{coverage.get('source_count', 0)} 个",
+        f"- 修订：{coverage.get('revision_count', 0)} 个",
+        f"- 内容块：{coverage.get('block_count', 0)} 个",
+        f"- 原文字符：{coverage.get('text_char_count', 0)}",
+        f"- 顾问可检索字符：{coverage.get('searchable_char_count', 0)}",
+        f"- 图片对象：{coverage.get('image_count', 0)} 个",
+        f"- 图片 OCR 有文字：{coverage.get('image_ocr_count', 0)} 个",
+        f"- 待审核块：{coverage.get('pending_block_count', 0)} 个",
+        f"- 无文字块：{coverage.get('no_text_block_count', 0)} 个",
+        f"- 失败块：{coverage.get('failed_block_count', 0)} 个",
+        f"- 已阻断块：{coverage.get('blocked_block_count', 0)} 个",
         "",
-        "## 待审核来源",
+        "## 提取与 OCR 警告",
         "",
     ]
+    extraction_warnings = [
+        (str(source["relative_path"]), str(warning))
+        for source in batch["sources"]
+        for warning in source.get("warnings", [])
+    ]
+    lines.extend(
+        (
+            f"- {relative_path}：{warning}"
+            for relative_path, warning in extraction_warnings
+        )
+        if extraction_warnings
+        else ["- 无"]
+    )
+    lines.extend(("", "## 阻断与失败对象", ""))
+    quality_issues = batch.get("quality_issues", [])
+    lines.extend(
+        (
+            f"- [{item['quality_status']}] {item['source']}｜"
+            f"{item['locator']}｜{item['kind']}："
+            f"{item.get('warning') or item.get('preview') or '无文字说明'}"
+            for item in quality_issues
+        )
+        if quality_issues
+        else ["- 无"]
+    )
+    lines.extend(
+        [
+            "",
+            "## 引用资料",
+            "",
+            f"- 引用次数：{link_report.occurrence_count}",
+            f"- 唯一资料：{link_report.unique_target_count}",
+            f"- 已入库资料：{link_report.ingested_target_count}",
+            f"- 已归档资料：{link_report.archived_target_count}",
+            f"- 顾问可用资料：{link_report.advisor_target_count}",
+            f"- 仅内部资料：{link_report.internal_only_target_count}",
+            f"- 未入库资料：{link_report.missing_target_count}",
+            f"- 内部锚点：{link_report.internal_anchor_count}",
+            "- 类型："
+            + "，".join(
+                f"{kind}={count}"
+                for kind, count in link_report.by_type.items()
+            ),
+            "",
+            "## 来源审核记录",
+            "",
+        ]
+    )
     for source in batch["sources"]:
-        if source["change"] not in {"new", "changed", "failed"}:
+        if not source.get("requires_review", False):
             continue
         lines.append(
             f"- {source['relative_path']}：{source['change']}；"
             f"建议输出 {', '.join(source['suggested_outputs']) or '待分类'}；"
             f"警告 {len(source.get('warnings', []))} 条"
         )
+    if batch.get("unsupported_files"):
+        lines.extend(("", "## 需转换的旧格式", ""))
+        lines.extend(f"- {value}" for value in batch["unsupported_files"])
     lines.extend(("", "## 未入库资料明细", ""))
     for item in batch["missing_links"]:
         lines.append(
@@ -1218,11 +2119,15 @@ class KnowledgeImportService:
         database_path: Path,
         staging_dir: Path,
         ocr_engine: DocumentOcr | None = None,
+        excluded_source_parts: Iterable[str] = DEFAULT_EXCLUDED_SOURCE_PARTS,
     ) -> None:
         self.knowledge_dir = knowledge_dir
         self.database_path = database_path
         self.staging_dir = staging_dir
         self.ocr_engine = ocr_engine
+        self.excluded_source_parts = {
+            str(value).casefold() for value in excluded_source_parts
+        }
 
     def _connect(self) -> sqlite3.Connection:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1236,17 +2141,38 @@ class KnowledgeImportService:
         with self._connect() as connection:
             return _current_link_report(connection)
 
+    def coverage_report(self) -> CoverageReport:
+        with self._connect() as connection:
+            return _coverage_report(connection)
+
+    def _is_excluded(self, path: Path, source_dir: Path) -> bool:
+        relative = path.relative_to(source_dir)
+        return any(
+            part.casefold() in self.excluded_source_parts
+            for part in relative.parts[:-1]
+        )
+
     def prepare(
         self, source_dir: Path, *, resume_batch_id: str | None = None
     ) -> PrepareReport:
         source_dir = source_dir.resolve()
         if not source_dir.is_dir():
             raise KnowledgeImportError(f"来源目录不存在：{source_dir}")
-        files = sorted(
+        candidates = sorted(
             path
             for path in source_dir.rglob("*")
-            if path.is_file() and path.suffix.casefold() in SUPPORTED_SOURCE_SUFFIXES
+            if path.is_file() and not self._is_excluded(path, source_dir)
         )
+        files = [
+            path
+            for path in candidates
+            if path.suffix.casefold() in SUPPORTED_SOURCE_SUFFIXES
+        ]
+        unsupported_files = [
+            path.relative_to(source_dir).as_posix()
+            for path in candidates
+            if path.suffix.casefold() in LEGACY_SOURCE_SUFFIXES
+        ]
         batch_id = resume_batch_id or (
             datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
             + "-"
@@ -1284,9 +2210,13 @@ class KnowledgeImportService:
 
         with self._connect() as connection:
             cached = {
-                row["sha256"]: (row["text"], row["warning"])
+                row["sha256"]: (
+                    row["text"],
+                    row["warning"],
+                    row["confidence"],
+                )
                 for row in connection.execute(
-                    "SELECT sha256, text, warning FROM image_ocr_cache"
+                    "SELECT sha256, text, warning, confidence FROM image_ocr_cache"
                 )
             }
             ocr = _OcrCoordinator(self.ocr_engine, cached)
@@ -1412,8 +2342,28 @@ class KnowledgeImportService:
                         progress_entry.get("extracted_file", "")
                     ),
                 }
+                revision_row = connection.execute(
+                    """
+                    SELECT id, status FROM source_revisions
+                    WHERE source_id = ? AND sha256 = ?
+                    """,
+                    (source_id, digest),
+                ).fetchone()
+                revision_needed = revision_row is None
+                source_record["requires_review"] = (
+                    change in {"new", "changed", "failed"}
+                    or revision_needed
+                    or (
+                        revision_row is not None
+                        and revision_row["status"] != "approved"
+                    )
+                )
+                source_record["revision_id"] = (
+                    int(revision_row["id"]) if revision_row is not None else None
+                )
+                source_record["revision_needed"] = revision_needed
                 if (
-                    change in {"new", "changed"}
+                    (change in {"new", "changed"} or revision_needed)
                     and not progress_entry.get("db_checkpoint", False)
                 ):
                     changed_records.append(
@@ -1503,6 +2453,15 @@ class KnowledgeImportService:
                 record["extracted_file"] = extracted_path.relative_to(batch_dir).as_posix()
                 if not reuse_extracted:
                     record["warnings"] = list(extracted.warnings)
+                revision_id = _store_source_revision(
+                    connection,
+                    source_id,
+                    record["sha256"],
+                    batch_id,
+                    extracted,
+                )
+                record["revision_id"] = revision_id
+                record["revision_needed"] = False
                 _replace_source_links(connection, source_id, extracted.links)
                 _store_ocr_pending(connection, ocr)
                 connection.commit()
@@ -1513,6 +2472,7 @@ class KnowledgeImportService:
                         "db_checkpoint": True,
                         "extracted_file": record["extracted_file"],
                         "warnings": record["warnings"],
+                        "revision_id": revision_id,
                     }
                 )
                 _write_json_atomic(progress_path, progress)
@@ -1546,15 +2506,119 @@ class KnowledgeImportService:
             decisions: dict[str, Any] = {}
             base_hashes: dict[str, str | None] = {}
             for source in batch_sources:
-                if source["change"] not in {"new", "changed", "failed"}:
+                if not source.get("requires_review", False):
                     continue
+                existing_outputs = [
+                    str(row[0])
+                    for row in connection.execute(
+                        """
+                        SELECT knowledge_path FROM source_outputs
+                        WHERE source_id = ? ORDER BY knowledge_path
+                        """,
+                        (source["source_id"],),
+                    )
+                ]
+                existing_aliases = [
+                    {
+                        "canonical_key": str(row[0]),
+                        "source_url": str(row[1]),
+                    }
+                    for row in connection.execute(
+                        """
+                        SELECT canonical_key, source_url FROM source_aliases
+                        WHERE source_id = ? ORDER BY canonical_key
+                        """,
+                        (source["source_id"],),
+                    )
+                ]
+                locator_candidates: list[dict[str, str | int]] = []
+                block_candidates: list[dict[str, Any]] = []
+                suggested_internal: list[str] = []
+                revision_id = source.get("revision_id")
+                if revision_id is not None:
+                    locator_candidates = [
+                        {
+                            "locator": str(row["locator"]),
+                            "blocks": int(row["blocks"]),
+                            "characters": int(row["characters"]),
+                        }
+                        for row in connection.execute(
+                            """
+                            SELECT locator, COUNT(*) AS blocks,
+                                   SUM(LENGTH(text)) AS characters
+                            FROM source_blocks WHERE revision_id = ?
+                            GROUP BY locator ORDER BY MIN(block_index)
+                            """,
+                            (revision_id,),
+                        )
+                    ]
+                    block_candidates = [
+                        {
+                            "block_key": str(row["block_key"]),
+                            "locator": str(row["locator"]),
+                            "kind": str(row["kind"]),
+                            "characters": len(str(row["text"])),
+                            "preview": str(row["text"])[:240],
+                            "audience": str(row["audience"]),
+                            "quality_status": str(row["quality_status"]),
+                            "confidence": row["confidence"],
+                            "warning": str(row["warning"] or ""),
+                        }
+                        for row in connection.execute(
+                            """
+                            SELECT block_key, locator, kind, text, audience,
+                                   quality_status, confidence, warning
+                            FROM source_blocks WHERE revision_id = ?
+                            ORDER BY block_index
+                            """,
+                            (revision_id,),
+                        )
+                    ]
+                    internal_terms = (
+                        "内部",
+                        "负责人",
+                        "业务指标",
+                        "培训排期",
+                        "转化率",
+                        "续报率",
+                        "销售目标",
+                        "业绩目标",
+                    )
+                    suggested_internal = [
+                        str(row["locator"])
+                        for row in connection.execute(
+                            """
+                            SELECT DISTINCT locator, text
+                            FROM source_blocks WHERE revision_id = ?
+                            """,
+                            (revision_id,),
+                        )
+                        if any(
+                            term in f"{row['locator']} {row['text']}"
+                            for term in internal_terms
+                        )
+                    ]
                 decisions[source["relative_path"]] = {
-                    "outputs": [],
+                    "outputs": existing_outputs,
                     "excluded_reason": "",
                     "alias_candidates": aliases.get(source["relative_path"], []),
-                    "aliases": [],
+                    "aliases": existing_aliases,
+                    "raw": {
+                        "status": "pending",
+                        "audience": "",
+                        "authority": "reference",
+                        "internal_locators": [],
+                        "suggested_internal_locators": list(
+                            dict.fromkeys(suggested_internal)
+                        ),
+                        "locator_candidates": locator_candidates,
+                        "block_candidates": block_candidates,
+                        "block_overrides": {},
+                    },
                 }
-                for output in source["suggested_outputs"]:
+                for output in (
+                    existing_outputs or source["suggested_outputs"]
+                ):
                     output_path = self.knowledge_dir / output
                     base_hashes[output] = (
                         _file_hash(output_path) if output_path.is_file() else None
@@ -1579,6 +2643,9 @@ class KnowledgeImportService:
                 "knowledge_base_hashes": base_hashes,
                 "missing_links": missing_links,
                 "link_report": asdict(link_report),
+                "unsupported_files": unsupported_files,
+                "coverage_report": asdict(_coverage_report(connection)),
+                "quality_issues": _current_quality_issues(connection),
             }
             batch_path = batch_dir / "batch.json"
             review_path = batch_dir / "review.json"
@@ -1649,18 +2716,36 @@ class KnowledgeImportService:
         }
         output_sources: dict[str, set[str]] = {}
         for relative_path, source in source_records.items():
-            if source["change"] not in {"new", "changed", "failed"}:
+            if not source.get("requires_review", False):
                 continue
             decision = decisions.get(relative_path)
             if not isinstance(decision, dict):
                 raise KnowledgeImportError(f"来源尚未审核：{relative_path}")
             outputs = decision.get("outputs", [])
             excluded_reason = str(decision.get("excluded_reason", "")).strip()
+            raw = decision.get("raw", {})
+            if not isinstance(raw, dict):
+                raise KnowledgeImportError(
+                    f"原文审核配置无效：{relative_path}"
+                )
+            raw_status = str(raw.get("status", "")).strip()
+            if raw_status not in {"approved", "deferred"}:
+                raise KnowledgeImportError(
+                    f"来源尚未完成原文审核：{relative_path}"
+                )
+            if raw_status == "approved" and source.get("revision_id") is None:
+                raise KnowledgeImportError(
+                    f"来源缺少可应用的原文修订：{relative_path}"
+                )
             if source["change"] == "failed" and not excluded_reason:
                 raise KnowledgeImportError(
                     f"提取失败来源必须说明排除原因：{relative_path}"
                 )
-            if not outputs and not excluded_reason:
+            if (
+                not outputs
+                and not excluded_reason
+                and raw_status not in {"approved", "deferred"}
+            ):
                 raise KnowledgeImportError(
                     f"来源必须指定知识输出或排除原因：{relative_path}"
                 )
@@ -1727,6 +2812,26 @@ class KnowledgeImportService:
                 excluded_reason = str(
                     decision.get("excluded_reason", "")
                 ).strip()
+                raw = decision.get("raw", {})
+                raw_status = str(raw.get("status", "")).strip()
+                if raw_status == "deferred":
+                    connection.execute(
+                        """
+                        UPDATE source_files
+                        SET review_status = ?, excluded_reason = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            "excluded" if excluded_reason else "deferred",
+                            excluded_reason,
+                            source_id,
+                        ),
+                    )
+                    continue
+                revision_id = int(source["revision_id"])
+                _apply_source_review(
+                    connection, revision_id, decision
+                )
                 connection.execute(
                     "DELETE FROM source_outputs WHERE source_id = ?",
                     (source_id,),
@@ -1743,25 +2848,20 @@ class KnowledgeImportService:
                         """,
                         ((source_id, output) for output in outputs),
                     )
-                    connection.execute(
-                        """
-                        UPDATE source_files
-                        SET approved_sha256 = sha256, review_status = 'approved',
-                            excluded_reason = '', approved_at = ?
-                        WHERE id = ?
-                        """,
-                        (_utc_now(), source_id),
-                    )
-                else:
-                    connection.execute(
-                        """
-                        UPDATE source_files
-                        SET approved_sha256 = NULL, review_status = 'excluded',
-                            excluded_reason = ?, approved_at = ?
-                        WHERE id = ?
-                        """,
-                        (excluded_reason, _utc_now(), source_id),
-                    )
+                connection.execute(
+                    """
+                    UPDATE source_files
+                    SET approved_sha256 = ?, review_status = 'approved',
+                        excluded_reason = ?, approved_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        source["sha256"],
+                        excluded_reason,
+                        _utc_now(),
+                        source_id,
+                    ),
+                )
                 aliases = decision.get("aliases", [])
                 for alias in aliases:
                     canonical = str(alias.get("canonical_key", "")).strip()
@@ -1781,9 +2881,12 @@ class KnowledgeImportService:
                         """,
                         (source_id, canonical, source_url),
                     )
+            _rebuild_source_fts(connection)
             link_report = _current_link_report(connection)
             batch["missing_links"] = _current_missing_links(connection)
             batch["link_report"] = asdict(link_report)
+            batch["coverage_report"] = asdict(_coverage_report(connection))
+            batch["quality_issues"] = _current_quality_issues(connection)
             _write_json_atomic(batch_path, batch)
             _write_report(batch_dir / "report.md", batch, link_report)
             connection.execute(
@@ -1798,6 +2901,16 @@ class KnowledgeImportService:
                     batch_id,
                 ),
             )
+        staging_root = self.staging_dir.resolve()
+        resolved_batch_dir = batch_dir.resolve()
+        for temporary_name in ("extracted", "draft"):
+            temporary_dir = (batch_dir / temporary_name).resolve()
+            if (
+                temporary_dir.is_dir()
+                and temporary_dir.parent == resolved_batch_dir
+                and resolved_batch_dir.is_relative_to(staging_root)
+            ):
+                shutil.rmtree(temporary_dir)
         return ApplyReport(
             batch_id=batch_id,
             output_count=len(copied),
@@ -1815,6 +2928,27 @@ def format_link_report(report: LinkReport) -> str:
         f"链接引用 {report.occurrence_count} 次，"
         f"唯一资料 {report.unique_target_count} 份，"
         f"已入库 {report.ingested_target_count} 份，"
+        f"其中顾问可用 {report.advisor_target_count} 份、"
+        f"仅内部 {report.internal_only_target_count} 份，"
         f"未入库 {report.missing_target_count} 份，"
         f"内部锚点 {report.internal_anchor_count} 个；类型：{types}"
+    )
+
+
+def format_coverage_report(report: CoverageReport) -> str:
+    kinds = "，".join(
+        f"{kind}={count}" for kind, count in report.by_kind.items()
+    ) or "无"
+    return (
+        f"来源 {report.source_count} 个，修订 {report.revision_count} 个，"
+        f"内容块 {report.block_count} 个，原文 {report.text_char_count} 字符，"
+        f"顾问可检索 {report.searchable_char_count} 字符；"
+        f"顾问块 {report.advisor_block_count} 个、"
+        f"内部块 {report.internal_block_count} 个、"
+        f"待审核块 {report.pending_block_count} 个、"
+        f"无文字块 {report.no_text_block_count} 个、"
+        f"失败块 {report.failed_block_count} 个；"
+        f"已阻断块 {report.blocked_block_count} 个；"
+        f"图片 {report.image_count} 个，其中 OCR 有文字 "
+        f"{report.image_ocr_count} 个；类型：{kinds}"
     )

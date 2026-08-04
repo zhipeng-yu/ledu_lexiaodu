@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import zipfile
 from pathlib import Path
 
 import pytest
+from PySide6.QtGui import QImage
 
-from lexiaodu.knowledge import KnowledgeType
+from lexiaodu.advice import AdviceService
+from lexiaodu.generator import SimulatedGenerator
+from lexiaodu.knowledge import KnowledgeBase, KnowledgeType
 from lexiaodu.knowledge_import import (
     KnowledgeImportError,
     KnowledgeImportService,
@@ -139,9 +143,45 @@ def _write_text_pdf(path: Path, text: str) -> None:
     path.write_bytes(payload)
 
 
+def _write_pptx(path: Path, image: bytes) -> None:
+    slide = """\
+<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+ xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+ <p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>课程讲次安排</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld>
+</p:sld>"""
+    notes = """\
+<p:notes xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+ xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+ <p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>顾问备注内容</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld>
+</p:notes>"""
+    rels = """\
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+ <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com/docs/slides" TargetMode="External"/>
+</Relationships>"""
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("ppt/slides/slide1.xml", slide)
+        archive.writestr("ppt/slides/_rels/slide1.xml.rels", rels)
+        archive.writestr("ppt/notesSlides/notesSlide1.xml", notes)
+        archive.writestr("ppt/media/image1.png", image)
+
+
 def _knowledge_dirs(root: Path) -> None:
     (root / "policy").mkdir(parents=True)
     (root / "style_case").mkdir()
+
+
+def _approve_raw(
+    decision: dict[str, object], *, audience: str = "advisor"
+) -> None:
+    raw = decision["raw"]
+    assert isinstance(raw, dict)
+    raw.update(
+        {
+            "status": "approved",
+            "audience": audience,
+            "authority": "primary",
+        }
+    )
 
 
 def test_url_normalization_and_link_classification() -> None:
@@ -246,6 +286,76 @@ def test_scanned_pdf_uses_document_ocr(
     )
 
 
+def test_pptx_and_standalone_image_extract_text_links_and_ocr(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "课程图.png"
+    image = QImage(120, 80, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    assert image.save(str(image_path), "PNG")
+    presentation = tmp_path / "课程.pptx"
+    _write_pptx(presentation, image_path.read_bytes())
+
+    class FakeOcrEngine:
+        def recognize_document(self, _image: object) -> list[TranscriptLine]:
+            return [
+                TranscriptLine(
+                    Speaker.PARENT,
+                    "图片中的课程信息",
+                    confidence=0.98,
+                )
+            ]
+
+    coordinator = _OcrCoordinator(FakeOcrEngine(), {})  # type: ignore[arg-type]
+    extracted_pptx = extract_source(presentation, coordinator)
+    extracted_image = extract_source(image_path, coordinator)
+
+    pptx_text = "\n".join(block.text for block in extracted_pptx.blocks)
+    assert "课程讲次安排" in pptx_text
+    assert "顾问备注内容" in pptx_text
+    assert "图片中的课程信息" in pptx_text
+    assert extracted_pptx.links[0].target_type == "document"
+    assert extracted_image.blocks[0].kind == "image_ocr"
+    assert extracted_image.blocks[0].confidence == pytest.approx(0.98)
+
+
+def test_docx_extracts_header_and_accounts_for_every_media_object(
+    tmp_path: Path,
+) -> None:
+    document = tmp_path / "完整课程.docx"
+    _write_docx(document, ["正文课程内容"])
+    image_path = tmp_path / "embedded.png"
+    image = QImage(120, 80, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    assert image.save(str(image_path), "PNG")
+    header = (
+        '<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        "<w:p><w:r><w:t>页眉课程版本</w:t></w:r></w:p></w:hdr>"
+    )
+    with zipfile.ZipFile(document, "a") as archive:
+        archive.writestr("word/header1.xml", header)
+        archive.writestr("word/media/image1.png", image_path.read_bytes())
+        archive.writestr("word/media/image2.png", image_path.read_bytes())
+
+    class FakeOcrEngine:
+        def recognize_document(self, _image: object) -> list[TranscriptLine]:
+            return [TranscriptLine(Speaker.PARENT, "图片课程表", confidence=0.99)]
+
+    extracted = extract_source(
+        document,
+        _OcrCoordinator(FakeOcrEngine(), {}),  # type: ignore[arg-type]
+    )
+
+    assert any(block.kind == "header" and "页眉课程版本" in block.text for block in extracted.blocks)
+    image_blocks = [
+        block
+        for block in extracted.blocks
+        if block.kind in {"image_ocr", "image_no_text"}
+    ]
+    assert len(image_blocks) == 2
+    assert all("图片课程表" in block.text for block in image_blocks)
+
+
 def test_prepare_requires_review_and_apply_resolves_link_target(
     tmp_path: Path,
 ) -> None:
@@ -290,14 +400,21 @@ def test_prepare_requires_review_and_apply_resolves_link_target(
     assert prepared.link_report.occurrence_count == 1
     assert prepared.link_report.unique_target_count == 1
     assert prepared.link_report.missing_target_count == 1
-    with pytest.raises(KnowledgeImportError, match="必须指定知识输出"):
+    with pytest.raises(KnowledgeImportError, match="尚未完成原文审核"):
         service.apply(prepared.batch_id)
     assert not (knowledge_dir / "policy" / "产品知识" / "课程.txt").exists()
 
     review = json.loads(prepared.review_path.read_text(encoding="utf-8"))
     directory_decision = review["decisions"]["资料目录.docx"]
+    assert directory_decision["raw"]["block_candidates"]
+    assert all(
+        candidate["block_key"]
+        for candidate in directory_decision["raw"]["block_candidates"]
+    )
     directory_decision["excluded_reason"] = "仅作为资料目录和引用来源"
+    _approve_raw(directory_decision, audience="internal")
     course_decision = review["decisions"]["课程说明.docx"]
+    _approve_raw(course_decision)
     course_decision["outputs"] = ["policy/产品知识/课程.txt"]
     assert len(course_decision["alias_candidates"]) == 1
     course_decision["aliases"] = course_decision["alias_candidates"]
@@ -327,6 +444,11 @@ def test_prepare_requires_review_and_apply_resolves_link_target(
     assert "已入库资料：1" in applied_report
     assert "未入库资料：0" in applied_report
     assert "https://example.com/docs/course" not in applied_report
+    with sqlite3.connect(tmp_path / "knowledge.sqlite3") as connection:
+        indexed_text = "\n".join(
+            row[0] for row in connection.execute("SELECT text FROM source_chunks")
+        )
+    assert "https://example.com/docs/course" not in indexed_text
 
     prepared_again = service.prepare(source_dir)
     assert prepared_again.unchanged_count == 2
@@ -363,6 +485,247 @@ def test_prepare_reuses_existing_knowledge_as_incremental_draft(
     assert existing.read_text(encoding="utf-8") == "# 初中数学\n已审核知识。\n"
 
 
+def test_approved_raw_source_is_searchable_and_internal_source_is_isolated(
+    tmp_path: Path,
+) -> None:
+    source_dir = tmp_path / "sources"
+    source_dir.mkdir()
+    _write_docx(source_dir / "课程资料.docx", ["星河班每周六上午上课。"])
+    _write_docx(source_dir / "内部资料.docx", ["内部续报率目标为百分之八十。"])
+    knowledge_dir = tmp_path / "knowledge"
+    _knowledge_dirs(knowledge_dir)
+    database = tmp_path / "knowledge.sqlite3"
+    service = KnowledgeImportService(
+        knowledge_dir, database, tmp_path / "staging"
+    )
+    prepared = service.prepare(source_dir)
+    review = json.loads(prepared.review_path.read_text(encoding="utf-8"))
+    _approve_raw(review["decisions"]["课程资料.docx"])
+    _approve_raw(
+        review["decisions"]["内部资料.docx"], audience="internal"
+    )
+    prepared.review_path.write_text(
+        json.dumps(review, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    service.apply(prepared.batch_id)
+    knowledge = KnowledgeBase(knowledge_dir, database)
+
+    public = knowledge.search("星河班周六", KnowledgeType.SOURCE)
+    assert public and public[0].source_tier == "approved_source"
+    assert "每周六上午" in public[0].evidence
+    assert knowledge.search("续报率目标", KnowledgeType.SOURCE) == []
+    internal = knowledge.search(
+        "续报率目标",
+        KnowledgeType.SOURCE,
+        include_internal=True,
+    )
+    assert internal and internal[0].document_name == "内部资料.docx"
+    suggestion = AdviceService(
+        knowledge, SimulatedGenerator()
+    ).create("星河班周六什么时候上课？")
+    assert any(
+        fact.source_tier == "approved_source"
+        for fact in suggestion.facts
+    )
+    assert "每周六上午" in suggestion.wechat_reply
+    coverage = service.coverage_report()
+    assert coverage.searchable_char_count >= len("星河班每周六上午上课。")
+    assert coverage.advisor_block_count == 1
+    assert coverage.internal_block_count == 1
+    assert not (prepared.review_path.parent / "extracted").exists()
+    assert not (prepared.review_path.parent / "draft").exists()
+
+
+def test_source_search_prefers_matching_subject_document_name(
+    tmp_path: Path,
+) -> None:
+    source_dir = tmp_path / "sources"
+    source_dir.mkdir()
+    _write_docx(source_dir / "初中数学课程.docx", ["课程讲次为十二讲。"])
+    _write_docx(source_dir / "小学数学课程.docx", ["课程讲次为十四讲。"])
+    knowledge_dir = tmp_path / "knowledge"
+    _knowledge_dirs(knowledge_dir)
+    database = tmp_path / "knowledge.sqlite3"
+    service = KnowledgeImportService(
+        knowledge_dir, database, tmp_path / "staging"
+    )
+    prepared = service.prepare(source_dir)
+    review = json.loads(prepared.review_path.read_text(encoding="utf-8"))
+    for decision in review["decisions"].values():
+        _approve_raw(decision)
+    prepared.review_path.write_text(
+        json.dumps(review, ensure_ascii=False), encoding="utf-8"
+    )
+    service.apply(prepared.batch_id)
+
+    results = KnowledgeBase(knowledge_dir, database).search(
+        "初中数学 课程讲次", KnowledgeType.SOURCE
+    )
+
+    assert results[0].document_name == "初中数学课程.docx"
+
+
+def test_prepare_excludes_advisor_chat_folder_and_reports_legacy_formats(
+    tmp_path: Path,
+) -> None:
+    source_dir = tmp_path / "sources"
+    source_dir.mkdir()
+    _write_docx(source_dir / "课程资料.docx", ["课程信息"])
+    chat_dir = source_dir / "顾问聊天记录"
+    chat_dir.mkdir()
+    (chat_dir / "聊天.png").write_bytes(b"not-an-import-source")
+    (source_dir / "旧资料.xls").write_bytes(b"legacy")
+    knowledge_dir = tmp_path / "knowledge"
+    _knowledge_dirs(knowledge_dir)
+    service = KnowledgeImportService(
+        knowledge_dir,
+        tmp_path / "knowledge.sqlite3",
+        tmp_path / "staging",
+    )
+
+    prepared = service.prepare(source_dir)
+    review = json.loads(prepared.review_path.read_text(encoding="utf-8"))
+    report = prepared.report_path.read_text(encoding="utf-8")
+
+    assert prepared.new_count == 1
+    assert set(review["decisions"]) == {"课程资料.docx"}
+    assert "顾问聊天记录" not in report
+    assert "旧资料.xls" in report
+
+
+def test_low_confidence_image_text_is_persisted_but_blocked_from_advice(
+    tmp_path: Path,
+) -> None:
+    source_dir = tmp_path / "sources"
+    source_dir.mkdir()
+    image_path = source_dir / "低可信课程图.png"
+    image = QImage(120, 80, QImage.Format.Format_RGB32)
+    image.fill(0xFFFFFF)
+    assert image.save(str(image_path), "PNG")
+
+    class LowConfidenceOcr:
+        def recognize_document(self, _image: object) -> list[TranscriptLine]:
+            return [
+                TranscriptLine(
+                    Speaker.PARENT,
+                    "可能识别错误的课程价格",
+                    confidence=0.55,
+                )
+            ]
+
+    knowledge_dir = tmp_path / "knowledge"
+    _knowledge_dirs(knowledge_dir)
+    database = tmp_path / "knowledge.sqlite3"
+    service = KnowledgeImportService(
+        knowledge_dir,
+        database,
+        tmp_path / "staging",
+        LowConfidenceOcr(),  # type: ignore[arg-type]
+    )
+    prepared = service.prepare(source_dir)
+    review = json.loads(prepared.review_path.read_text(encoding="utf-8"))
+    _approve_raw(review["decisions"]["低可信课程图.png"])
+    prepared.review_path.write_text(
+        json.dumps(review, ensure_ascii=False), encoding="utf-8"
+    )
+
+    service.apply(prepared.batch_id)
+
+    assert KnowledgeBase(knowledge_dir, database).search(
+        "课程价格", KnowledgeType.SOURCE
+    ) == []
+    coverage = service.coverage_report()
+    assert coverage.text_char_count >= len("可能识别错误的课程价格")
+    assert coverage.blocked_block_count == 1
+
+
+def test_review_marked_conflict_is_blocked_from_source_search(
+    tmp_path: Path,
+) -> None:
+    source_dir = tmp_path / "sources"
+    source_dir.mkdir()
+    _write_docx(source_dir / "待核对课程.docx", ["课程共十二讲，数字待核对。"])
+    knowledge_dir = tmp_path / "knowledge"
+    _knowledge_dirs(knowledge_dir)
+    database = tmp_path / "knowledge.sqlite3"
+    service = KnowledgeImportService(
+        knowledge_dir, database, tmp_path / "staging"
+    )
+    prepared = service.prepare(source_dir)
+    review = json.loads(prepared.review_path.read_text(encoding="utf-8"))
+    decision = review["decisions"]["待核对课程.docx"]
+    _approve_raw(decision)
+    block_key = decision["raw"]["block_candidates"][0]["block_key"]
+    decision["raw"]["block_overrides"][block_key] = {
+        "quality_status": "blocked"
+    }
+    prepared.review_path.write_text(
+        json.dumps(review, ensure_ascii=False), encoding="utf-8"
+    )
+
+    service.apply(prepared.batch_id)
+
+    assert KnowledgeBase(knowledge_dir, database).search(
+        "十二讲", KnowledgeType.SOURCE
+    ) == []
+    assert service.coverage_report().blocked_block_count == 1
+    report = prepared.report_path.read_text(encoding="utf-8")
+    assert "[blocked] 待核对课程.docx" in report
+    assert "课程共十二讲" in report
+
+
+def test_source_version_switch_is_atomic_and_missing_file_keeps_last_approval(
+    tmp_path: Path,
+) -> None:
+    source_dir = tmp_path / "sources"
+    source_dir.mkdir()
+    source = source_dir / "课程版本.docx"
+    _write_docx(source, ["旧版课程每周一讲。"])
+    knowledge_dir = tmp_path / "knowledge"
+    _knowledge_dirs(knowledge_dir)
+    database = tmp_path / "knowledge.sqlite3"
+    service = KnowledgeImportService(
+        knowledge_dir, database, tmp_path / "staging"
+    )
+
+    first = service.prepare(source_dir)
+    first_review = json.loads(first.review_path.read_text(encoding="utf-8"))
+    _approve_raw(first_review["decisions"]["课程版本.docx"])
+    first.review_path.write_text(
+        json.dumps(first_review, ensure_ascii=False), encoding="utf-8"
+    )
+    service.apply(first.batch_id)
+    assert KnowledgeBase(knowledge_dir, database).search(
+        "旧版课程", KnowledgeType.SOURCE
+    )
+
+    _write_docx(source, ["新版课程每周两讲。"])
+    second = service.prepare(source_dir)
+    knowledge = KnowledgeBase(knowledge_dir, database)
+    assert knowledge.search("旧版课程", KnowledgeType.SOURCE)
+    assert not any(
+        "新版课程" in result.evidence
+        for result in knowledge.search("新版课程", KnowledgeType.SOURCE)
+    )
+    second_review = json.loads(second.review_path.read_text(encoding="utf-8"))
+    _approve_raw(second_review["decisions"]["课程版本.docx"])
+    second.review_path.write_text(
+        json.dumps(second_review, ensure_ascii=False), encoding="utf-8"
+    )
+    service.apply(second.batch_id)
+    assert knowledge.search("新版课程", KnowledgeType.SOURCE)
+    assert not any(
+        "旧版课程" in result.evidence
+        for result in knowledge.search("旧版课程", KnowledgeType.SOURCE)
+    )
+
+    source.unlink()
+    missing = service.prepare(source_dir)
+    assert missing.missing_source_count == 1
+    assert knowledge.search("新版课程", KnowledgeType.SOURCE)
+
+
 def test_apply_rejects_unreviewed_output_overwrite(tmp_path: Path) -> None:
     source_dir = tmp_path / "sources"
     source_dir.mkdir()
@@ -379,6 +742,7 @@ def test_apply_rejects_unreviewed_output_overwrite(tmp_path: Path) -> None:
     review["decisions"]["新资料.docx"]["outputs"] = [
         "policy/产品知识/新资料.txt"
     ]
+    _approve_raw(review["decisions"]["新资料.docx"])
     prepared.review_path.write_text(
         json.dumps(review, ensure_ascii=False), encoding="utf-8"
     )

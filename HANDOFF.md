@@ -1,6 +1,35 @@
-# 乐小读 Day 5 最终集成交接
+# 乐小读项目交接
 
-更新时间：2026-08-03
+更新时间：2026-08-04
+
+## 2026-08-04 双层全量知识库
+
+### 已完成架构
+
+- 保留 `knowledge/policy` 与 `knowledge/style_case` 整理层，在同一个 `data/knowledge.sqlite3` 中新增来源修订、原始内容块、原文切片和 SQLite FTS5 索引；原始二进制文件仍留在外部来源目录。
+- `--prepare-knowledge-import` 只写待审核修订、逐块审核清单、覆盖报告和整理差异草稿；`--apply-knowledge-import` 原子启用审核修订并重建两层索引。来源修改但未审核、或文件暂时移走时，旧审核版本继续可用。
+- 每个提取对象在 `review.json` 的 `raw.block_candidates` 中带稳定块 ID、定位、类型、字符数、预览、受众、质量、OCR 置信度和警告。审核可按来源、定位或块覆盖为顾问可用、仅内部、阻断、无文字或失败，禁止静默遗漏。
+- 来源递归支持 DOCX、XLSX、PPTX、文本/扫描 PDF、PNG、JPG/JPEG 和 WebP；`.doc`、`.xls`、`.ppt` 进入转换清单。Office 深层结构、链接、替代文字和嵌入图片 OCR 均保留定位。
+- `顾问聊天记录/**` 是配置级排除路径。本任务没有读取、OCR、修改或入库其中 3 张聊天截图；顾问语气任务拥有 `src/lexiaodu/generator.py`、`tests/test_generator.py` 及相关风格资料，本任务未编辑或提交这些文件。
+- `KnowledgeType.SOURCE` 只返回已审核、顾问可用、质量合格的原文；`--include-internal` 只用于本机审计。链接 URL 保留在引用图和报告中，不进入顾问证据。
+- `AdviceService` 在不改变 Generator 接口的前提下统一排序整理 `policy` 与审核原文，相关度接近时优先整理知识，精确原文用于补足表格、图片和未整理细节。
+- 新增 `--knowledge-coverage-report`；链接报告现区分已归档、顾问可用、仅内部和未入库资料。Windows 控制台无法编码个别 OCR 符号时会安全替换，不再中断检索。
+
+### 首批 16 份资料迁移
+
+- 已应用批次：`20260804T043436Z-5b70fd81`。16 个来源均有审核修订，整理层仍为 23 个文档、146 个切片。
+- 原文层共 1,908 个内容块、213,676 个字符；顾问可检索 192,682 字符、1,696 个块，仅内部 212 个块，待审核 0 个。
+- 473 个 Word 内嵌图片全部有状态：467 个 OCR 有文字，6 个明确无文字；提取失败 0 个，低可信或事实风险阻断 4 个。
+- 第二轮受众审计额外隔离了内部联络说明、员工编号表、企业微信外部群截图、学员画像示例，以及带联系方式/企业微信入口的教师介绍图；内容仍可审计，但不会传给顾问回复。
+- 链接基线保持 96 次引用、89 个唯一目标；5 个目标已归档且顾问可用，84 个仍未入库。导入器不自动访问或下载链接。
+- 代表性原文检索已验证图片信息：`初中数学 第1讲` 优先返回课程目录图片 OCR，`彭睿老师 高考物理满分` 返回物理教师介绍图片 OCR；内部续报目标默认不可检索，增加 `--include-internal` 才可审计。
+- 本地审核文件和报告保留在 `artifacts/knowledge-import/20260804T043436Z-5b70fd81/`；应用后临时全文和草稿目录均已删除。`knowledge/`、`data/`、真实资料和审核 artifacts 继续由 Git 忽略。
+
+### 主要新增验证
+
+- DOCX 正文/表格/页眉/全部媒体对象，XLSX 单元格/公式/批注/链接，PPTX 幻灯片/备注/链接/媒体，文本与扫描 PDF，独立图片和 OCR 质量门槛。
+- 顾问/内部隔离、人工冲突阻断、链接 URL 排除、来源标题与精确短语排序、旧版继续服务与审核后原子切换、来源缺失保留旧版本、暂停恢复和旧格式转换清单。
+- 完整测试、编译、依赖和 Git 差异检查结果见本文件末尾最新验证记录。
 
 ## Day 5 最终集成
 
@@ -12,7 +41,7 @@
 - AI 问答输入框兼容中文输入法组合态：拼音组词期间隐藏占位文字，提交或取消组合后恢复，避免占位提示与候选文字重叠。
 - README、安装运行说明、五分钟演示脚本、指定电脑手动清单、顾问试用表和验收结果已经补齐。
 - 最终代码验证为 87 tests passed，Python 编译和依赖检查通过，Qt 当前会话内存截图烟测通过。
-- 启用豆包时，OCR 校正对话和本次 Top 3 片段会发送给火山方舟；Key 只存在被 Git 忽略的本机 `.env`，但正式使用前仍需确认外部数据处理要求。
+- 启用豆包时，OCR 校正对话和本次知识检索片段会发送给火山方舟；Key 只存在被 Git 忽略的本机 `.env`，但正式使用前仍需确认外部数据处理要求。
 - 最终指定演示电脑的真实聊天 OCR、DPI 缩放和剪贴板肉眼验证，以及真实顾问试用，仍须按 `docs/MANUAL_TEST_CHECKLIST.md` 和 `docs/ADVISOR_TRIAL_FORM.md` 执行。
 
 ## Day 4 基线
@@ -54,7 +83,7 @@
 
 ### 真实检索驱动的生成流程
 
-- `AdviceService` 对每次对话分别执行 `policy` 和 `style_case` 真实检索，再调用 Generator；生成器不能绕过检索流程。
+- `AdviceService` 对每次对话执行整理 `policy`、审核原文兜底和 `style_case` 真实检索，再调用 Generator；生成器不能绕过检索流程。
 - 默认 `SimulatedGenerator` 不需要 API。检索到制度依据时，顾虑摘要和微信短回复会使用排名第一的真实文档、定位和证据；没有制度依据时只建议转人工核实，不编造事实。
 - 建议卡的事实依据直接绑定 `SearchResult`，不接受生成器或未来模型自行返回引用。
 - 手动问题和 OCR 校正对话使用同一条后台生成链路，生成期间不阻塞 Qt 主线程。
@@ -117,6 +146,9 @@
 - `KnowledgeImportService.resume(batch_id, source_dir)`：从文件级检查点继续暂停批次。
 - `KnowledgeImportService.apply(batch_id)`：应用审核草稿、来源映射和稳定链接别名，并重建正式索引。
 - `KnowledgeImportService.link_report()`：查询当前全量链接入库统计。
+- `KnowledgeImportService.coverage_report()`：查询来源修订、对象、字符、图片 OCR、无文字、失败和阻断覆盖。
+- `KnowledgeBase.search(..., KnowledgeType.SOURCE)`：检索审核通过的顾问原文；`include_internal=True` 仅用于本机审计。
+- `KnowledgeBase.search_advice_policy(...)`：统一排序整理知识与审核原文，供 `AdviceService` 使用。
 
 ## 主要文件
 
@@ -127,13 +159,13 @@
 - `src/lexiaodu/chat.py`：完整建议卡、编辑、复制门控和反馈交互。
 - `src/lexiaodu/workflow.py`：手动问题/OCR 到建议工作台的后台链路。
 - `src/lexiaodu/app.py`：本地模拟或真实豆包生成器的环境配置、校验和服务装配。
-- `src/lexiaodu/knowledge_import.py`：DOCX/XLSX/PDF增量提取、OCR协调、来源状态、链接图、审核和应用事务。
+- `src/lexiaodu/knowledge_import.py`：DOCX/XLSX/PPTX/PDF/图片增量提取、OCR协调、来源修订、逐块审核、FTS5 原文索引、链接图和应用事务。
 - `src/lexiaodu/ocr.py`：聊天OCR与不使用聊天布局过滤的文档OCR模式。
-- `src/lexiaodu/knowledge.py`：分类BM25检索；文档名、章节和正文共同参与排序。
+- `src/lexiaodu/knowledge.py`：整理层 BM25、审核原文 FTS5、受众隔离和两层统一排序；文档名、章节、精确短语和正文共同参与排序。
 - `config/app.toml`：默认来源目录、审核暂存目录和本地知识路径。
 - `tests/test_generator.py`、`tests/test_risk.py`、`tests/test_feedback.py`：Day 4 核心逻辑测试。
 - `tests/test_chat.py`、`tests/test_workflow.py`：工作台和悬浮工具端到端交互回归。
-- `tests/test_knowledge_import.py`：格式提取、链接规范化、审核门槛、增量草稿、暂停恢复和链接入库测试。
+- `tests/test_knowledge_import.py`：格式提取、链接规范化、逐块审核、冲突/低可信阻断、版本切换、来源缺失、增量草稿、暂停恢复和链接入库测试。
 
 ## 验证命令
 
@@ -147,6 +179,17 @@ $env:PYTHONIOENCODING = 'utf-8'
 .\.venv\python.exe -B -m lexiaodu --knowledge-link-report
 git diff --check
 ```
+
+2026-08-04 双层知识库最终结果：
+
+- 完整测试：99 tests passed（最终复测 6.06 秒）。
+- Python 编译检查：通过；依赖一致性：`No broken requirements found`。
+- 真实覆盖报告：16 个来源、16 个审核修订、1,908 个内容块、213,676 个原文字符、192,682 个顾问可检索字符；473 个图片对象中 467 个 OCR 有文字、6 个无文字，失败 0 个、阻断 4 个。
+- 真实链接报告：96 次引用、89 个唯一资料、5 个已入库且顾问可用、84 个未入库。
+- 数据隔离检查：`顾问聊天记录` 来源 0 个，原文检索切片中的 URL 0 个，FTS5 正式切片 2,020 个。
+- 代表性图片检索和内部审计开关通过；Windows 控制台特殊 OCR 符号不再导致编码异常。
+- 差异空白检查通过，仅有仓库既有 LF/CRLF 转换提示。
+- 删除双层迁移前临时数据库备份、测试临时目录和本次编译缓存；两个已应用审核批次及其报告继续保留以便追溯。
 
 2026-08-03 最终结果：
 
@@ -162,11 +205,11 @@ git diff --check
 ## 已知边界与后续工作
 
 - 豆包生成依赖网络、方舟服务可用性、账户额度和模型权限；失败时显示生成错误，不会自动绕过本地风险规则。
-- 启用豆包会把本次 OCR 校正对话和 Top 3 检索片段发送给火山方舟；正式使用前仍需确认供应商数据处理要求。
+- 启用豆包会把本次 OCR 校正对话和本次两层知识检索片段发送给火山方舟；正式使用前仍需确认供应商数据处理要求。
 - 风险规则是保守的确定性关键词规则；新业务风险类型需要显式补规则和测试。
 - 通过审核导入命令应用知识时会自动重建索引；直接手工编辑 `knowledge/` 后仍需执行 `--rebuild-knowledge`。
 - 增量来源导入支持扫描PDF OCR；直接把扫描PDF放入正式 `knowledge/` 仍不能由基础索引器OCR。
-- 旧版 `.xls` 不直接支持，需要先转换为 `.xlsx`。
+- 旧版 `.doc`、`.xls`、`.ppt` 不直接提取，会进入转换清单，需先转换为对应 OOXML 格式。
 - 知识草稿必须经人工或Codex审核；提取失败、时期待确认、事实冲突和仅标题相似的链接不能自动进入正式知识。
 - 内部链接只记录在本地元数据和审核报告中，导入器不会自动访问或下载。
 - 聊天和建议历史仅驻留当前进程；只有结构化反馈会持久化。

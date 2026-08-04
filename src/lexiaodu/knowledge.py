@@ -16,6 +16,7 @@ from xml.etree import ElementTree
 SUPPORTED_SUFFIXES = {".txt", ".docx", ".pdf"}
 DEFAULT_CHUNK_SIZE = 500
 MAX_SEARCH_RESULTS = 3
+MAX_ADVICE_RESULTS = 5
 _WORD_NAMESPACE = {
     "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 }
@@ -33,6 +34,7 @@ class KnowledgeError(RuntimeError):
 class KnowledgeType(StrEnum):
     POLICY = "policy"
     STYLE_CASE = "style_case"
+    SOURCE = "source"
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +50,8 @@ class SearchResult:
     locator: str
     evidence: str
     score: float
+    source_tier: str = "curated"
+    authority: str = "primary"
 
 
 @dataclass(frozen=True, slots=True)
@@ -299,7 +303,7 @@ class KnowledgeBase:
     def _collect_documents(self) -> tuple[list[_IndexedDocument], int]:
         if not self.knowledge_dir.is_dir():
             raise KnowledgeError(f"知识目录不存在: {self.knowledge_dir}")
-        for knowledge_type in KnowledgeType:
+        for knowledge_type in (KnowledgeType.POLICY, KnowledgeType.STYLE_CASE):
             expected = self.knowledge_dir / knowledge_type
             if not expected.is_dir():
                 raise KnowledgeError(f"知识目录缺少分类子目录: {expected}")
@@ -421,6 +425,7 @@ class KnowledgeBase:
         knowledge_type: KnowledgeType,
         *,
         top_k: int = MAX_SEARCH_RESULTS,
+        include_internal: bool = False,
     ) -> list[SearchResult]:
         if not query.strip():
             raise ValueError("检索词不能为空")
@@ -429,9 +434,18 @@ class KnowledgeBase:
         try:
             selected_type = KnowledgeType(knowledge_type)
         except ValueError as exc:
-            raise ValueError("知识类型必须是 policy 或 style_case") from exc
+            raise ValueError("知识类型必须是 policy、style_case 或 source") from exc
         if not self.database_path.is_file():
             raise KnowledgeError("本地知识索引不存在，请先重建知识目录")
+
+        if selected_type is KnowledgeType.SOURCE:
+            return self._search_source(
+                query,
+                top_k=top_k,
+                include_internal=include_internal,
+            )
+        if include_internal:
+            raise ValueError("include_internal 只能用于 source 检索")
 
         with sqlite3.connect(self.database_path) as connection:
             connection.row_factory = sqlite3.Row
@@ -474,6 +488,155 @@ class KnowledgeBase:
             )
             for score, _, row in ranked
         ]
+
+    @staticmethod
+    def _source_query(query: str) -> str:
+        terms = list(dict.fromkeys(tokenize(query)))
+        return " OR ".join(
+            f'"{term.replace(chr(34), chr(34) * 2)}"'
+            for term in terms
+            if term.strip()
+        )
+
+    def _search_source(
+        self,
+        query: str,
+        *,
+        top_k: int,
+        include_internal: bool,
+    ) -> list[SearchResult]:
+        fts_query = self._source_query(query)
+        if not fts_query:
+            return []
+        audience_filter = "" if include_internal else "AND fts.audience = 'advisor'"
+        try:
+            with sqlite3.connect(self.database_path) as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    f"""
+                    SELECT chunk.id AS chunk_id, source.name,
+                           block.locator, chunk.text,
+                           block.authority,
+                           -bm25(source_chunks_fts, 0, 0, 0, 2, 2, 3) AS score
+                    FROM source_chunks_fts AS fts
+                    JOIN source_chunks AS chunk
+                      ON chunk.id = CAST(fts.source_chunk_id AS INTEGER)
+                    JOIN source_blocks AS block ON block.id = chunk.block_id
+                    JOIN source_revisions AS revision
+                      ON revision.id = block.revision_id
+                    JOIN source_files AS source ON source.id = revision.source_id
+                    WHERE source_chunks_fts MATCH ?
+                      {audience_filter}
+                      AND revision.status = 'approved'
+                      AND block.quality_status = 'approved'
+                    ORDER BY score DESC, chunk.id
+                    LIMIT ?
+                    """,
+                    (fts_query, max(top_k * 100, 300)),
+                ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc).casefold():
+                return []
+            raise KnowledgeError(f"原文知识索引查询失败：{exc}") from exc
+        query_terms = set(tokenize(query))
+        query_phrases = {
+            value.casefold()
+            for value in re.findall(r"[a-z0-9\u3400-\u9fff]+", query)
+            if len(value) > 1
+        }
+
+        def weighted_score(row: sqlite3.Row) -> float:
+            title = set(tokenize(row["name"]))
+            locator = set(tokenize(row["locator"]))
+            content = set(tokenize(row["text"]))
+            folded_title = str(row["name"]).casefold()
+            folded_locator = str(row["locator"]).casefold()
+            folded_content = str(row["text"]).casefold()
+            return (
+                sum(
+                    (0.35 if len(term) == 1 and not term.isascii() else 1.0)
+                    * max(
+                        5.0 if term in title else 0.0,
+                        3.0 if term in locator else 0.0,
+                        4.0 if term in content else 0.0,
+                    )
+                    for term in query_terms
+                )
+                + sum(
+                    max(
+                        10.0 if phrase in folded_title else 0.0,
+                        7.0 if phrase in folded_locator else 0.0,
+                        8.0 if phrase in folded_content else 0.0,
+                    )
+                    for phrase in query_phrases
+                )
+                + min(float(row["score"]), 1.0)
+            )
+
+        ranked = sorted(
+            rows,
+            key=lambda row: (-weighted_score(row), row["chunk_id"]),
+        )[:top_k]
+        return [
+            SearchResult(
+                knowledge_type=KnowledgeType.SOURCE,
+                document_name=row["name"],
+                locator=row["locator"],
+                evidence=_evidence(row["text"], query),
+                score=weighted_score(row),
+                source_tier="approved_source",
+                authority=str(row["authority"]),
+            )
+            for row in ranked
+        ]
+
+    def search_advice_policy(
+        self, query: str, *, top_k: int = MAX_ADVICE_RESULTS
+    ) -> list[SearchResult]:
+        if not 1 <= top_k <= MAX_ADVICE_RESULTS:
+            raise ValueError(f"top_k 必须在 1 到 {MAX_ADVICE_RESULTS} 之间")
+        curated = self.search(
+            query,
+            KnowledgeType.POLICY,
+            top_k=min(MAX_SEARCH_RESULTS, top_k),
+        )
+        source = self.search(
+            query,
+            KnowledgeType.SOURCE,
+            top_k=MAX_SEARCH_RESULTS,
+        )
+        query_terms = set(tokenize(query))
+
+        def relevance(result: SearchResult) -> tuple[float, int]:
+            candidate = tokenize(
+                f"{result.document_name} {result.locator} {result.evidence}"
+            )
+            overlap = (
+                len(query_terms.intersection(candidate)) / len(query_terms)
+                if query_terms
+                else 0.0
+            )
+            tier_bonus = 0.08 if result.source_tier == "curated" else 0.0
+            authority_bonus = 0.03 if result.authority == "primary" else 0.0
+            return overlap + tier_bonus + authority_bonus, (
+                0 if result.source_tier == "curated" else 1
+            )
+
+        ranked = sorted(
+            (*curated, *source),
+            key=lambda result: (-relevance(result)[0], relevance(result)[1]),
+        )
+        seen: set[tuple[str, str]] = set()
+        selected: list[SearchResult] = []
+        for result in ranked:
+            key = (result.document_name, re.sub(r"\s+", "", result.evidence))
+            if key in seen:
+                continue
+            seen.add(key)
+            selected.append(result)
+            if len(selected) == top_k:
+                break
+        return selected
 
 
 def format_search_results(results: list[SearchResult]) -> str:

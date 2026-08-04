@@ -29,6 +29,7 @@ from lexiaodu.knowledge import (
 from lexiaodu.knowledge_import import (
     KnowledgeImportError,
     KnowledgeImportService,
+    format_coverage_report,
     format_link_report,
 )
 from lexiaodu.ocr import PaddleOcrEngine
@@ -59,7 +60,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--knowledge-type",
         choices=[value.value for value in KnowledgeType],
-        help="检索类型；policy 与 style_case 不会混合",
+        help="检索类型；policy、style_case 与 source 不会混合",
+    )
+    parser.add_argument(
+        "--include-internal",
+        action="store_true",
+        help="source 检索时同时包含仅内部可查的原文",
     )
     parser.add_argument(
         "--prepare-knowledge-import",
@@ -85,6 +91,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--knowledge-link-report",
         action="store_true",
         help="统计引用次数、唯一资料以及已入库/未入库数量",
+    )
+    parser.add_argument(
+        "--knowledge-coverage-report",
+        action="store_true",
+        help="统计原文修订、内容块、字符和图片 OCR 覆盖情况",
     )
     return parser
 
@@ -113,6 +124,12 @@ def _position_toolbar(toolbar: FloatingToolbar, settings: AppSettings) -> None:
 def _configure_application(application: QApplication, app_name: str) -> None:
     application.setApplicationName(app_name)
     application.setQuitOnLastWindowClosed(False)
+
+
+def _console_safe_text(value: str, stream: object | None = None) -> str:
+    output = stream if stream is not None else sys.stdout
+    encoding = getattr(output, "encoding", None) or "utf-8"
+    return value.encode(encoding, errors="replace").decode(encoding)
 
 
 def _build_generator_from_environment() -> Generator:
@@ -166,12 +183,20 @@ def run(argv: Sequence[str] | None = None) -> int:
 
     if args.search and args.knowledge_type is None:
         print(
-            "检索时必须通过 --knowledge-type 指定 policy 或 style_case",
+            "检索时必须通过 --knowledge-type 指定 policy、style_case 或 source",
             file=sys.stderr,
         )
         return 2
     if args.knowledge_type and not args.search:
         print("--knowledge-type 只能与 --search 一起使用", file=sys.stderr)
+        return 2
+    if args.include_internal and (
+        not args.search or args.knowledge_type != KnowledgeType.SOURCE.value
+    ):
+        print(
+            "--include-internal 只能与 source 检索一起使用",
+            file=sys.stderr,
+        )
         return 2
     if args.knowledge_source_dir and not (
         args.prepare_knowledge_import or args.resume_knowledge_import
@@ -189,10 +214,11 @@ def run(argv: Sequence[str] | None = None) -> int:
             args.resume_knowledge_import,
             args.apply_knowledge_import,
             args.knowledge_link_report,
+            args.knowledge_coverage_report,
         )
     )
     if import_actions > 1:
-        print("知识导入准备、应用和链接报告命令不能同时执行", file=sys.stderr)
+        print("知识导入准备、应用和报告命令不能同时执行", file=sys.stderr)
         return 2
     if import_actions:
         service = KnowledgeImportService(
@@ -207,6 +233,7 @@ def run(argv: Sequence[str] | None = None) -> int:
                 )
                 else None
             ),
+            settings.knowledge_import.excluded_source_parts,
         )
         try:
             if args.prepare_knowledge_import:
@@ -242,8 +269,10 @@ def run(argv: Sequence[str] | None = None) -> int:
                     f"{report.indexed_chunk_count} 个切片；"
                     f"{format_link_report(report.link_report)}"
                 )
-            else:
+            elif args.knowledge_link_report:
                 print(format_link_report(service.link_report()))
+            else:
+                print(format_coverage_report(service.coverage_report()))
         except KnowledgeImportError as exc:
             print(f"知识导入错误：{exc}", file=sys.stderr)
             return 1
@@ -274,8 +303,9 @@ def run(argv: Sequence[str] | None = None) -> int:
                 results = knowledge.search(
                     args.search,
                     KnowledgeType(args.knowledge_type),
+                    include_internal=args.include_internal,
                 )
-                print(format_search_results(results))
+                print(_console_safe_text(format_search_results(results)))
         except KnowledgeError as exc:
             print(f"知识库错误: {exc}", file=sys.stderr)
             return 1

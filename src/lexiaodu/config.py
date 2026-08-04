@@ -38,6 +38,7 @@ class KnowledgeSettings:
 class KnowledgeImportSettings:
     source_dir: Path = Path("incoming_knowledge")
     staging_dir: Path = Path("artifacts/knowledge-import")
+    excluded_source_parts: tuple[str, ...] = ("顾问聊天记录",)
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +113,19 @@ def load_settings(path: Path) -> AppSettings:
     )
     if not isinstance(import_staging_dir, str) or not import_staging_dir.strip():
         raise SettingsError("knowledge_import.staging_dir 必须是非空字符串")
+    excluded_source_parts = knowledge_import.get(
+        "excluded_source_parts", ["顾问聊天记录"]
+    )
+    if (
+        not isinstance(excluded_source_parts, list)
+        or not all(
+            isinstance(value, str) and value.strip()
+            for value in excluded_source_parts
+        )
+    ):
+        raise SettingsError(
+            "knowledge_import.excluded_source_parts 必须是非空字符串数组"
+        )
     feedback_database_path = feedback.get(
         "database_path", "data/feedback.sqlite3"
     )
@@ -140,6 +154,7 @@ def load_settings(path: Path) -> AppSettings:
         knowledge_import=KnowledgeImportSettings(
             source_dir=Path(import_source_dir),
             staging_dir=Path(import_staging_dir),
+            excluded_source_parts=tuple(excluded_source_parts),
         ),
         feedback=FeedbackSettings(
             database_path=Path(feedback_database_path),

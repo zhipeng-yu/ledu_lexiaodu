@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from lexiaodu.app import run
+from lexiaodu.app import _console_safe_text, run
 
 
 def _write_config(path: Path, root: Path, database: Path) -> None:
@@ -58,3 +58,37 @@ def test_search_cli_requires_explicit_knowledge_type(
 
     assert exit_code == 2
     assert "--knowledge-type" in capsys.readouterr().err
+
+
+def test_coverage_cli_and_internal_flag_validation(
+    tmp_path: Path, capsys
+) -> None:
+    config = tmp_path / "app.toml"
+    _write_config(config, tmp_path / "knowledge", tmp_path / "knowledge.sqlite3")
+
+    exit_code = run(
+        ["--config", str(config), "--knowledge-coverage-report"]
+    )
+
+    assert exit_code == 0
+    assert "来源 0 个" in capsys.readouterr().out
+    invalid = run(
+        [
+            "--config",
+            str(config),
+            "--search",
+            "课程",
+            "--knowledge-type",
+            "policy",
+            "--include-internal",
+        ]
+    )
+    assert invalid == 2
+    assert "只能与 source 检索" in capsys.readouterr().err
+
+
+def test_console_safe_text_replaces_unencodable_ocr_symbols() -> None:
+    class AsciiStream:
+        encoding = "ascii"
+
+    assert _console_safe_text("course ⬆", AsciiStream()) == "course ?"

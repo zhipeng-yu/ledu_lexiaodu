@@ -33,8 +33,13 @@ class AdviceService:
     def create(self, transcript: str) -> AdviceSuggestion:
         if not transcript.strip():
             raise ValueError("对话内容不能为空")
+        search_advice = getattr(
+            self._knowledge, "search_advice_policy", None
+        )
         policy_results = tuple(
-            self._knowledge.search(transcript, KnowledgeType.POLICY)
+            search_advice(transcript)
+            if callable(search_advice)
+            else self._knowledge.search(transcript, KnowledgeType.POLICY)
         )
         style_results = tuple(
             self._knowledge.search(transcript, KnowledgeType.STYLE_CASE)

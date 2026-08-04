@@ -20,6 +20,9 @@ def test_load_project_settings() -> None:
     assert settings.knowledge_import.staging_dir == Path(
         "artifacts/knowledge-import"
     )
+    assert settings.knowledge_import.excluded_source_parts == (
+        "顾问聊天记录",
+    )
     assert settings.feedback.database_path == Path("data/feedback.sqlite3")
 
 
