@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import math
 import re
 import sqlite3
@@ -15,8 +16,14 @@ from xml.etree import ElementTree
 from lexiaodu.knowledge_semantics import (
     query_semantic_filters,
     requests_campaign_information,
+    requests_class_selection,
+    requests_enrollment_rules,
     requests_internal_information,
     requests_national_tianjin_compatibility,
+    requests_online_course_service,
+    requests_out_of_scope_region,
+    requests_product_overview,
+    requests_teacher_information,
     requires_live_system_lookup,
     semantic_row_matches,
 )
@@ -590,7 +597,7 @@ class KnowledgeBase:
                     def block_is_eligible(row: sqlite3.Row) -> bool:
                         records = semantic_by_block.get(int(row["block_id"]), [])
                         if not records:
-                            return True
+                            return not filters
                         campaigns = [
                             record
                             for record in records
@@ -778,9 +785,33 @@ class KnowledgeBase:
         try:
             with sqlite3.connect(self.database_path) as connection:
                 connection.row_factory = sqlite3.Row
+                link_columns = {
+                    str(row[1])
+                    for row in connection.execute(
+                        "PRAGMA table_info(policy_semantic_links)"
+                    )
+                }
+                locator_sql = (
+                    "link.policy_locator" if "policy_locator" in link_columns
+                    else "'' AS policy_locator"
+                )
+                if "policy_text_hash" in link_columns:
+                    hash_sql = "link.policy_text_hash"
+                    chunk_sql = "policy_chunk.text AS policy_text"
+                    chunk_join_sql = (
+                        "LEFT JOIN chunks AS policy_chunk "
+                        "ON policy_chunk.document_id = document.id "
+                        "AND policy_chunk.locator = link.policy_locator"
+                    )
+                else:
+                    hash_sql = "'' AS policy_text_hash"
+                    chunk_sql = "'' AS policy_text"
+                    chunk_join_sql = ""
                 rows = connection.execute(
-                    """
-                    SELECT document.name, record.record_kind,
+                    f"""
+                    SELECT document.name, {locator_sql}, {hash_sql},
+                           {chunk_sql},
+                           record.record_kind,
                            record.scope_status,
                            record.grade, record.subject,
                            record.class_type, record.period,
@@ -789,6 +820,7 @@ class KnowledgeBase:
                     FROM policy_semantic_links AS link
                     JOIN documents AS document
                       ON document.path = link.knowledge_path
+                    {chunk_join_sql}
                     JOIN semantic_records AS record
                       ON record.id = link.semantic_record_id
                     WHERE record.record_status = 'approved'
@@ -800,14 +832,35 @@ class KnowledgeBase:
             if "no such table" in str(exc).casefold():
                 return results
             raise KnowledgeError(f"语义知识映射查询失败：{exc}") from exc
-        by_document: dict[str, list[sqlite3.Row]] = {}
+        by_section: dict[tuple[str, str], list[sqlite3.Row]] = {}
+        legacy_by_document: dict[str, list[sqlite3.Row]] = {}
+        mapped_documents: set[str] = set()
         for row in rows:
-            by_document.setdefault(str(row["name"]), []).append(row)
+            document_name = str(row["name"])
+            locator = str(row["policy_locator"] or "")
+            mapped_documents.add(document_name)
+            if locator:
+                expected_hash = hashlib.sha256(
+                    f"{locator}\0{str(row['policy_text'] or '')}".encode(
+                        "utf-8"
+                    )
+                ).hexdigest()
+                if str(row["policy_text_hash"] or "") != expected_hash:
+                    continue
+            if locator:
+                by_section.setdefault((document_name, locator), []).append(row)
+            else:
+                legacy_by_document.setdefault(document_name, []).append(row)
         current_day = date.today().isoformat()
 
         def document_is_eligible(result: SearchResult) -> bool:
-            records = by_document.get(result.document_name, [])
+            records = by_section.get(
+                (result.document_name, result.locator),
+                legacy_by_document.get(result.document_name, []),
+            )
             if not records:
+                if result.document_name in mapped_documents:
+                    return False
                 return not campaign_only and not compatible_only
             if compatible_only and not any(
                 row["scope_status"] == "tianjin_compatible" for row in records
@@ -836,7 +889,11 @@ class KnowledgeBase:
     ) -> list[SearchResult]:
         if not 1 <= top_k <= MAX_ADVICE_RESULTS:
             raise ValueError(f"top_k 必须在 1 到 {MAX_ADVICE_RESULTS} 之间")
-        if requests_internal_information(query) or requires_live_system_lookup(query):
+        if (
+            requests_internal_information(query)
+            or requests_out_of_scope_region(query)
+            or requires_live_system_lookup(query)
+        ):
             return []
         curated = self.search(
             query,
@@ -846,23 +903,43 @@ class KnowledgeBase:
         filters = query_semantic_filters(query)
         campaign_only = requests_campaign_information(query)
         compatible_only = requests_national_tianjin_compatibility(query)
+        product_overview_only = requests_product_overview(query)
+        curated_only = any(
+            predicate(query)
+            for predicate in (
+                requests_class_selection,
+                requests_teacher_information,
+                requests_enrollment_rules,
+                requests_online_course_service,
+            )
+        ) or product_overview_only
         curated = self._filter_curated_by_semantics(
             curated,
             filters,
             campaign_only=campaign_only,
             compatible_only=compatible_only,
         )
+        if product_overview_only:
+            curated = [
+                result for result in curated
+                if result.document_name == "课程产品总览.txt"
+                and result.locator.startswith("天津课程产品线｜")
+            ]
         source = (
             []
-            if campaign_only or compatible_only
+            if campaign_only or compatible_only or curated_only
             else self.search(
                 query,
                 KnowledgeType.SOURCE,
                 top_k=MAX_SEARCH_RESULTS,
             )
         )
-        semantic_source = self._search_semantic_source(
-            query, top_k=MAX_SEARCH_RESULTS
+        semantic_source = (
+            []
+            if curated_only
+            else self._search_semantic_source(
+                query, top_k=MAX_SEARCH_RESULTS
+            )
         )
         query_terms = set(tokenize(query))
 

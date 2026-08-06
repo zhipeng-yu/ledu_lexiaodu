@@ -194,6 +194,39 @@ PDF、PNG、JPG/JPEG 和 WebP：Office 文档会提取正文、表格、页眉�
 .\.venv\python.exe -m lexiaodu --knowledge-semantic-report
 ```
 
+### 从正式证据升级 Policy
+
+需要把已审核的正式 `semantic/source` 提炼为高频整理知识时，使用 policy 升级模式：
+
+```powershell
+.\.venv\python.exe -m lexiaodu --prepare-knowledge-import --policy-upgrade
+```
+
+该模式只读取当前正式 SQLite，生成证据快照，并把当前 policy 与已有章节证据映射带入增量草稿和
+`review.json` 的 `policy_upgrade` 审核区；首次没有 policy 时草稿为空。它不扫描原始资料、
+不执行 OCR，也不修改正式检索。每个批准章节必须记录
+唯一标题、正文哈希和至少一个有效 semantic record ID，系统会继续校验其 source revision/block、
+天津适用范围、受众、质量、权威等级和活动状态。精确讲次、教材版本或价格还必须使用
+`primary` 证据。
+
+逐章审核完成后仍通过原有 apply 原子切换：
+
+```powershell
+.\.venv\python.exe -m lexiaodu --apply-knowledge-import <BATCH_ID>
+```
+
+policy-only apply 只替换 policy 文件、整理知识索引、章节级 semantic 映射和
+`source_outputs`；正式 source、semantic 与四类 `style_case` 不会重建。失败时知识文件、
+SQLite 映射和索引一起恢复。查看文件、章节、semantic/source 绑定率、领域覆盖和退休文件：
+
+```powershell
+.\.venv\python.exe -m lexiaodu --knowledge-policy-report
+```
+
+班型选择和教师背景/教学方式问题只使用审核后的 policy 结论，避免原始案例、员工信息或内部评价
+参与事实回答；上海、广州等其他地区独有问题不会从天津知识库拼接答案。现有 `+0.08` policy
+加分和 `+0.03` primary 加分保持不变。
+
 活动只有日期完整、来源审核通过且 apply 当日处于有效期内才会标记为 `active`；`expired`、`pending`、`conflict` 均不能进入顾问检索。检索时还会根据当前日期再次检查，避免应用后自然过期的活动继续出现。
 
 链接图按规范化 URL 去重，同时保留每次引用的来源和定位。报告区分已归档、顾问可用、

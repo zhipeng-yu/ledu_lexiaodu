@@ -36,6 +36,16 @@ from lexiaodu.knowledge_semantics import (
     suggest_block_disposition,
 )
 from lexiaodu.ocr import MIN_TEXT_CONFIDENCE, OcrError, PaddleOcrEngine
+from lexiaodu.policy_upgrade import (
+    PolicyCoverageReport,
+    PolicyUpgradeError,
+    ensure_policy_schema,
+    policy_coverage_report,
+)
+from lexiaodu.policy_upgrade_service import (
+    apply_policy_upgrade,
+    prepare_policy_upgrade,
+)
 
 
 SUPPORTED_SOURCE_SUFFIXES = {
@@ -1506,9 +1516,13 @@ def _schema(connection: sqlite3.Connection) -> None:
                                 textbook_version);
         CREATE TABLE IF NOT EXISTS policy_semantic_links (
             knowledge_path TEXT NOT NULL,
+            policy_locator TEXT NOT NULL DEFAULT '',
+            policy_text_hash TEXT NOT NULL DEFAULT '',
             semantic_record_id INTEGER NOT NULL
                 REFERENCES semantic_records(id) ON DELETE CASCADE,
-            PRIMARY KEY (knowledge_path, semantic_record_id)
+            PRIMARY KEY (
+                knowledge_path, policy_locator, semantic_record_id
+            )
         );
         """
     )
@@ -1541,6 +1555,7 @@ def _schema(connection: sqlite3.Connection) -> None:
         connection.execute(
             "ALTER TABLE semantic_records ADD COLUMN conflict_key TEXT NOT NULL DEFAULT ''"
         )
+    ensure_policy_schema(connection)
     if usage_status_added:
         connection.execute(
             """
@@ -2447,8 +2462,9 @@ def _apply_semantic_review(
             connection.executemany(
                 """
                 INSERT INTO policy_semantic_links (
-                    knowledge_path, semantic_record_id
-                ) VALUES (?, ?)
+                    knowledge_path, policy_locator, policy_text_hash,
+                    semantic_record_id
+                ) VALUES (?, '', '', ?)
                 """,
                 ((str(output), semantic_record_id) for output in outputs),
             )
@@ -3144,6 +3160,32 @@ class KnowledgeImportService:
         with self._connect() as connection:
             return _semantic_coverage_report(connection)
 
+    def policy_report(self) -> PolicyCoverageReport:
+        with self._connect() as connection:
+            return policy_coverage_report(connection)
+
+    def prepare_policy_upgrade(self) -> PrepareReport:
+        try:
+            prepared = prepare_policy_upgrade(
+                self.knowledge_dir,
+                self.staging_dir,
+                self._connect,
+            )
+        except PolicyUpgradeError as exc:
+            raise KnowledgeImportError(str(exc)) from exc
+        return PrepareReport(
+            batch_id=prepared.batch_id,
+            new_count=0,
+            changed_count=0,
+            unchanged_count=0,
+            missing_source_count=0,
+            failed_count=0,
+            excluded_count=0,
+            link_report=self.link_report(),
+            review_path=prepared.review_path,
+            report_path=prepared.report_path,
+        )
+
     def _is_excluded(self, path: Path, source_dir: Path) -> bool:
         relative = path.relative_to(source_dir)
         return any(
@@ -3805,6 +3847,24 @@ class KnowledgeImportService:
             raise KnowledgeImportError(f"导入批次不存在：{batch_id}")
         batch = json.loads(batch_path.read_text(encoding="utf-8"))
         review = json.loads(review_path.read_text(encoding="utf-8"))
+        if batch.get("mode") == "policy_upgrade":
+            try:
+                applied = apply_policy_upgrade(
+                    batch_id,
+                    self.knowledge_dir,
+                    self.staging_dir,
+                    self._connect,
+                )
+            except PolicyUpgradeError as exc:
+                raise KnowledgeImportError(str(exc)) from exc
+            return ApplyReport(
+                batch_id=batch_id,
+                output_count=applied.output_count,
+                indexed_document_count=applied.indexed_document_count,
+                indexed_chunk_count=applied.indexed_chunk_count,
+                semantic_record_count=0,
+                link_report=self.link_report(),
+            )
         decisions = review.get("decisions", {})
         if not isinstance(decisions, dict):
             raise KnowledgeImportError("审核文件 decisions 必须是对象")
@@ -4234,4 +4294,25 @@ def format_semantic_report(report: SemanticCoverageReport) -> str:
         f"{report.campaign_conflict_count}、舍弃 "
         f"{report.campaign_discarded_count}；关系：{relations}；"
         f"块处置：{usage}；领域：{domains}"
+    )
+
+
+def format_policy_report(report: PolicyCoverageReport) -> str:
+    domains = "；".join(
+        (
+            f"{domain}：文件{values['documents']}、"
+            f"章节{values['sections']}"
+        )
+        for domain, values in report.by_domain.items()
+    ) or "无"
+    return (
+        f"Policy {report.document_count} 份、{report.section_count} 个章节，"
+        f"已绑定 {report.linked_section_count} 个章节 "
+        f"({report.binding_rate:.1%})，未绑定 "
+        f"{report.unlinked_section_count} 个；semantic映射 "
+        f"{report.semantic_link_count} 条，其中有效 "
+        f"{report.valid_semantic_link_count} 条；source间接绑定 "
+        f"{report.source_bound_section_count} 个章节 "
+        f"({report.source_binding_rate:.1%})；退休旧policy "
+        f"{report.retired_document_count} 份；领域：{domains}"
     )

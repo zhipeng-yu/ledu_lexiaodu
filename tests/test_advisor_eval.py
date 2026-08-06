@@ -7,6 +7,7 @@ from pathlib import Path
 from lexiaodu.knowledge_semantics import (
     requests_internal_information,
     requests_national_tianjin_compatibility,
+    requests_out_of_scope_region,
     requires_live_system_lookup,
 )
 
@@ -17,7 +18,7 @@ EVAL_PATH = Path(__file__).parent / "fixtures" / "anonymized_advisor_eval.json"
 def test_anonymized_advisor_eval_covers_required_scenarios_without_identifiers() -> None:
     cases = json.loads(EVAL_PATH.read_text(encoding="utf-8"))
 
-    assert len(cases) == 15
+    assert len(cases) == 21
     assert {case["id"] for case in cases} == {
         "class_s_vs_aplus",
         "summer_autumn_continuity",
@@ -34,6 +35,12 @@ def test_anonymized_advisor_eval_covers_required_scenarios_without_identifiers()
         "national_tianjin_scope",
         "internal_information_block",
         "live_app_order_status",
+        "tianjin_textbook_specific",
+        "reviewed_teacher_specific",
+        "lesson_count_specific",
+        "class_choice_specific",
+        "refund_specific",
+        "other_region_induction",
     }
     rendered = json.dumps(cases, ensure_ascii=False)
     assert "http://" not in rendered and "https://" not in rendered
@@ -54,3 +61,7 @@ def test_anonymized_advisor_eval_covers_required_scenarios_without_identifiers()
         case for case in cases if case["id"] == "national_tianjin_scope"
     )
     assert requests_national_tianjin_compatibility(national["question"])
+    other_region = next(
+        case for case in cases if case["id"] == "other_region_induction"
+    )
+    assert requests_out_of_scope_region(other_region["question"])

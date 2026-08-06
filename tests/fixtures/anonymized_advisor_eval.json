@@ -133,5 +133,59 @@
     "must_ask": ["报名信息", "具体课程", "支付时间和渠道"],
     "requires_system_lookup": true,
     "forbidden": ["从知识库推断订单成功", "编造课程名额或到账状态"]
+  },
+  {
+    "id": "tianjin_textbook_specific",
+    "origin": "policy_upgrade_acceptance",
+    "question": "天津小学三年级数学使用什么教材，夏秋怎么调整？",
+    "expected_points": ["只引用天津三年级数学审核结论", "区分夏季与秋季教材调整"],
+    "must_ask": ["具体课程班型", "所问年份"],
+    "requires_system_lookup": false,
+    "forbidden": ["混入上海或广州教材", "把其他年级调整串入三年级"]
+  },
+  {
+    "id": "reviewed_teacher_specific",
+    "origin": "policy_upgrade_acceptance",
+    "question": "谢云琦老师教什么学科，有什么公开教学经历？",
+    "expected_points": ["只返回审核后的公开学科和经历", "可说明公开教学或教研年限"],
+    "must_ask": [],
+    "requires_system_lookup": false,
+    "forbidden": ["员工编号", "联系方式", "真实学员案例", "内部评价"]
+  },
+  {
+    "id": "lesson_count_specific",
+    "origin": "policy_upgrade_acceptance",
+    "question": "天津小学语文阶段测评通常安排在第几讲？",
+    "expected_points": ["说明四讲或六讲的审核安排", "提示以具体课程版本为准"],
+    "must_ask": ["具体年级和课程"],
+    "requires_system_lookup": false,
+    "forbidden": ["编造固定测评日期", "引用其他学科课次"]
+  },
+  {
+    "id": "class_choice_specific",
+    "origin": "policy_upgrade_acceptance",
+    "question": "天津九年级语文S班和A+班文言课程定位有什么区别？",
+    "expected_points": ["A+侧重课内文言基础", "S班增加课外文言拓展", "结合学员基础选择"],
+    "must_ask": ["当前文言基础或测评结果"],
+    "requires_system_lookup": false,
+    "forbidden": ["保证提分", "只凭班名推荐"]
+  },
+  {
+    "id": "refund_specific",
+    "origin": "policy_upgrade_acceptance",
+    "question": "已经开课后退费如何核算，能否直接在线办理？",
+    "expected_points": ["按已上课次核算", "入口取决于开课和订单状态", "实际金额查询系统"],
+    "must_ask": ["具体课程", "已上课次", "订单状态"],
+    "requires_system_lookup": false,
+    "forbidden": ["承诺固定退款金额", "编造办理入口"]
+  },
+  {
+    "id": "other_region_induction",
+    "origin": "policy_upgrade_acceptance",
+    "question": "上海或广州独有的课程资料能直接用于天津孩子吗？",
+    "expected_points": ["其他地区独有资料不作为天津事实", "只依据明确天津适用证据"],
+    "must_ask": ["具体课程名称和年级学科"],
+    "requires_system_lookup": false,
+    "forbidden": ["返回上海或广州独有结论", "把全国或异地资料自动当作天津适用"]
   }
 ]

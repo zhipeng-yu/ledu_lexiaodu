@@ -31,6 +31,7 @@ from lexiaodu.knowledge_import import (
     KnowledgeImportService,
     format_coverage_report,
     format_link_report,
+    format_policy_report,
     format_semantic_report,
 )
 from lexiaodu.ocr import PaddleOcrEngine
@@ -84,6 +85,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="准备批次时复用现有修订并重新审核全部来源，不重复提取或 OCR",
     )
     parser.add_argument(
+        "--policy-upgrade",
+        action="store_true",
+        help="仅从正式semantic/source准备policy升级批次，不扫描资料或OCR",
+    )
+    parser.add_argument(
         "--apply-knowledge-import",
         metavar="BATCH_ID",
         help="应用已审核的知识导入批次并重建索引",
@@ -107,6 +113,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--knowledge-semantic-report",
         action="store_true",
         help="统计语义候选、正式记录、来源绑定、领域、关系和活动状态",
+    )
+    parser.add_argument(
+        "--knowledge-policy-report",
+        action="store_true",
+        help="统计policy文件、章节及semantic/source证据绑定情况",
     )
     return parser
 
@@ -223,6 +234,20 @@ def run(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    if args.policy_upgrade and not args.prepare_knowledge_import:
+        print(
+            "--policy-upgrade 只能与 --prepare-knowledge-import 一起使用",
+            file=sys.stderr,
+        )
+        return 2
+    if args.policy_upgrade and (
+        args.review_all_knowledge_sources or args.knowledge_source_dir
+    ):
+        print(
+            "policy升级模式不扫描来源，不能指定来源目录或重新审核全部来源",
+            file=sys.stderr,
+        )
+        return 2
 
     import_actions = sum(
         bool(value)
@@ -233,6 +258,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             args.knowledge_link_report,
             args.knowledge_coverage_report,
             args.knowledge_semantic_report,
+            args.knowledge_policy_report,
         )
     )
     if import_actions > 1:
@@ -246,7 +272,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             (
                 PaddleOcrEngine(settings.ocr.model_cache_dir)
                 if (
-                    args.prepare_knowledge_import
+                    (args.prepare_knowledge_import and not args.policy_upgrade)
                     or args.resume_knowledge_import
                 )
                 else None
@@ -255,14 +281,17 @@ def run(argv: Sequence[str] | None = None) -> int:
         )
         try:
             if args.prepare_knowledge_import:
-                source_dir = (
-                    args.knowledge_source_dir
-                    or settings.knowledge_import.source_dir
-                )
-                report = service.prepare(
-                    source_dir,
-                    review_all_sources=args.review_all_knowledge_sources,
-                )
+                if args.policy_upgrade:
+                    report = service.prepare_policy_upgrade()
+                else:
+                    source_dir = (
+                        args.knowledge_source_dir
+                        or settings.knowledge_import.source_dir
+                    )
+                    report = service.prepare(
+                        source_dir,
+                        review_all_sources=args.review_all_knowledge_sources,
+                    )
                 print(
                     f"知识导入批次已准备：{report.batch_id}\n"
                     f"审核文件：{report.review_path}\n"
@@ -294,6 +323,8 @@ def run(argv: Sequence[str] | None = None) -> int:
                 print(format_link_report(service.link_report()))
             elif args.knowledge_semantic_report:
                 print(format_semantic_report(service.semantic_report()))
+            elif args.knowledge_policy_report:
+                print(format_policy_report(service.policy_report()))
             else:
                 print(format_coverage_report(service.coverage_report()))
         except KnowledgeImportError as exc:

@@ -106,6 +106,32 @@ def test_review_all_sources_requires_prepare(capsys) -> None:
     assert "--review-all-knowledge-sources" in capsys.readouterr().err
 
 
+def test_policy_report_cli(tmp_path: Path, capsys) -> None:
+    config = tmp_path / "app.toml"
+    _write_config(config, tmp_path / "knowledge", tmp_path / "knowledge.sqlite3")
+
+    exit_code = run(["--config", str(config), "--knowledge-policy-report"])
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert "Policy 0 份、0 个章节" in output
+    assert "source间接绑定 0 个章节 (100.0%)" in output
+
+
+def test_policy_upgrade_flag_validation(capsys) -> None:
+    assert run(["--policy-upgrade"]) == 2
+    assert "只能与 --prepare-knowledge-import" in capsys.readouterr().err
+
+    assert run(
+        [
+            "--prepare-knowledge-import",
+            "--policy-upgrade",
+            "--review-all-knowledge-sources",
+        ]
+    ) == 2
+    assert "policy升级模式不扫描来源" in capsys.readouterr().err
+
+
 def test_console_safe_text_replaces_unencodable_ocr_symbols() -> None:
     class AsciiStream:
         encoding = "ascii"

@@ -522,6 +522,61 @@ def requests_national_tianjin_compatibility(query: str) -> bool:
     return "全国" in query and "天津" in query
 
 
+def requests_out_of_scope_region(query: str) -> bool:
+    return any(region in query for region in ("上海", "广州")) and any(
+        term in query
+        for term in (
+            "课程", "教材", "班", "政策", "资料", "地区", "适用", "孩子"
+        )
+    )
+
+
+def requests_class_selection(query: str) -> bool:
+    class_terms = {
+        term
+        for term in ("A班", "A+班", "S班", "S+班", "中考A+", "中考S", "自招S", "创新S")
+        if term in query
+    }
+    comparison = any(
+        term in query for term in ("区别", "差别", "适合", "怎么选", "如何选", "选择")
+    )
+    return comparison and (len(class_terms) >= 2 or "班型" in query)
+
+
+def requests_teacher_information(query: str) -> bool:
+    return any(term in query for term in ("老师", "教师", "师资")) and any(
+        term in query
+        for term in ("背景", "经历", "履历", "介绍", "怎么教", "教学", "授课")
+    )
+
+
+def requests_enrollment_rules(query: str) -> bool:
+    matched = sum(
+        term in query
+        for term in ("报名", "缴费", "续报", "转班", "退费", "退款")
+    )
+    return matched >= 2 or (
+        matched >= 1
+        and any(term in query for term in ("规则", "怎么办", "如何", "怎么"))
+    )
+
+
+def requests_online_course_service(query: str) -> bool:
+    return "回放" in query and any(
+        term in query
+        for term in ("线上", "直播", "设备", "学习服务", "服务")
+    )
+
+
+def requests_product_overview(query: str) -> bool:
+    return any(
+        term in query for term in ("哪些课程", "有什么课程", "都有什么课程", "产品线")
+    ) or (
+        "课程产品" in query
+        and any(term in query for term in ("哪些", "有什么", "都有什么", "总览"))
+    )
+
+
 def requires_live_system_lookup(query: str) -> bool:
     compact = " ".join(query.split())
     patterns = (
