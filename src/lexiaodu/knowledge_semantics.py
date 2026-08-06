@@ -66,8 +66,41 @@ _TEXTBOOK_PATTERN = re.compile(
     r"(?:人教|北师大|冀教|苏教|沪教|外研|剑桥|教科|鲁教|部编)版?"
 )
 
+_CAMPAIGN_TERMS = (
+    "活动",
+    "优惠",
+    "赠品",
+    "老带新",
+    "金币",
+    "奖学金",
+    "截止礼",
+    "早享礼",
+    "报名礼",
+    "续报礼",
+    "转介绍",
+    "返现",
+    "满减",
+    "立减",
+    "优惠券",
+    "礼品",
+    "限时",
+    "赠课",
+    "赠送",
+    "福利",
+)
+_NON_FACTUAL_ACTIVITY_TERMS = _CAMPAIGN_TERMS[1:]
+_INTERNAL_SCRIPT_TERMS = (
+    "话术",
+    "私信",
+    "群发",
+    "触达",
+    "未回复",
+    "宣发",
+    "项目推进",
+)
+
 _DOMAIN_TERMS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    (BUSINESS_DOMAINS[7], ("活动", "优惠", "赠品", "老带新", "金币", "奖学金")),
+    (BUSINESS_DOMAINS[7], _CAMPAIGN_TERMS),
     (BUSINESS_DOMAINS[6], ("报名", "缴费", "续报", "转班", "退费", "补缴")),
     (BUSINESS_DOMAINS[5], ("师资", "老师", "授课", "教学", "回放", "设备", "答疑", "服务")),
     (BUSINESS_DOMAINS[4], ("衔接", "规划", "重复", "后续", "先修", "续学")),
@@ -110,8 +143,6 @@ _MARKETING_RISK_TERMS = (
     "智力提升",
     "一定有效",
 )
-_CAMPAIGN_TERMS = ("活动", "优惠", "赠品", "老带新", "金币", "奖学金")
-
 _MARKETING_RISK_TERMS += (
     "\u9ec4\u91d1\u65f6\u671f",
     "\u9ec4\u91d1\u671f",
@@ -258,6 +289,10 @@ def _infer_usage(value: str, scope_status: str) -> tuple[str, str]:
         return "discarded", "内部经营、人员、排期或系统管理信息"
     if any(term in value for term in _MARKETING_RISK_TERMS):
         return "discarded", "无法核实的结果性营销主张"
+    if any(term in value for term in _NON_FACTUAL_ACTIVITY_TERMS):
+        return "pending", "活动优惠、赠品或续报营销内容需完整审核"
+    if any(term in value for term in _INTERNAL_SCRIPT_TERMS):
+        return "discarded", "内部触达、宣发或顾问执行内容"
     if (
         _PHONE_PATTERN.search(value)
         or _IDENTIFIER_PATTERN.search(value)
@@ -273,6 +308,9 @@ def suggest_block_disposition(
     combined = f"{source_name} {locator} {text}"
     scope_status, scope_reason = _infer_scope(source_name, combined)
     usage_status, discard_reason = _infer_usage(combined, scope_status)
+    if usage_status == "advisor" and "话术" in source_name:
+        usage_status = "discarded"
+        discard_reason = "内部顾问话术不作为对客事实"
     return usage_status, discard_reason or scope_reason, scope_status
 
 
@@ -329,6 +367,9 @@ def infer_semantic_candidates(
     textbook_version = textbook_match.group(0) if textbook_match else ""
     scope_status, scope_reason = _infer_scope(source_name, combined)
     usage_status, discard_reason = _infer_usage(combined, scope_status)
+    if usage_status == "advisor" and "话术" in source_name:
+        usage_status = "discarded"
+        discard_reason = "内部顾问话术不作为对客事实"
     if scope_reason and not discard_reason:
         discard_reason = scope_reason
     course_name = Path(source_name).stem
