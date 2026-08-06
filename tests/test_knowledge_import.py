@@ -999,6 +999,16 @@ def test_review_all_sources_reuses_approved_revision_without_reextracting(
     service.apply(second.batch_id)
     assert service.semantic_report().record_count == first_record_count
 
+    third = service.prepare(source_dir, review_all_sources=True)
+    third_review = json.loads(third.review_path.read_text(encoding="utf-8"))
+    third_decision = next(iter(third_review["decisions"].values()))
+    _approve_raw(third_decision)
+    third.review_path.write_text(
+        json.dumps(third_review, ensure_ascii=False), encoding="utf-8"
+    )
+    service.apply(third.batch_id)
+    assert service.semantic_report().record_count == first_record_count
+
 
 def test_expired_campaign_is_recorded_but_not_searchable(tmp_path: Path) -> None:
     source_dir = tmp_path / "sources"

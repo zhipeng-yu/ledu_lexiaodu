@@ -2339,6 +2339,20 @@ def _apply_semantic_review(
         )
     ]
     if old_record_ids:
+        connection.execute(
+            """
+            DELETE FROM semantic_records
+            WHERE record_status = 'superseded'
+              AND candidate_id IN (
+                  SELECT candidate.id
+                  FROM semantic_candidates AS candidate
+                  JOIN source_revisions AS revision
+                    ON revision.id = candidate.revision_id
+                  WHERE revision.source_id = ?
+              )
+            """,
+            (source_id,),
+        )
         connection.executemany(
             "UPDATE semantic_records SET record_status = 'superseded' WHERE id = ?",
             ((record_id,) for record_id in old_record_ids),

@@ -45,6 +45,11 @@ _PHONE_PATTERN = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
 _IDENTIFIER_PATTERN = re.compile(
     r"(?:学员号|订单号|员工编号|手机号|联系电话)\s*[:：]?\s*[A-Za-z0-9_-]{5,}"
 )
+_STAFF_PROFILE_PATTERN = re.compile(
+    r"(?:\u6559\u5e08\u4fe1\u606f|\u5458\u5de5\u4fe1\u606f|\u8868\u626c\u7c7b\u578b|\u5728\u8bfb\u73ed\u7ea7\u4fe1\u606f|\u8f85\u5bfc\u56e2|\u5458\u5de5\u7f16\u53f7)"
+    r".{0,200}(?<!\d)\d{5,}(?!\d)",
+    re.DOTALL,
+)
 _DATE_PATTERN = re.compile(
     r"(?<!\d)(20\d{2})[年./-](\d{1,2})[月./-](\d{1,2})日?"
 )
@@ -88,6 +93,13 @@ _INTERNAL_TERMS = (
     "会议纪要",
     "开课人次",
 )
+_INTERNAL_TERMS += (
+    "\u7ecf\u8425\u76ee\u6807",
+    "\u7eed\u62a5\u76ee\u6807",
+    "\u62db\u751f\u76ee\u6807",
+    "\u8f6c\u5316\u76ee\u6807",
+)
+
 _MARKETING_RISK_TERMS = (
     "包过",
     "保过",
@@ -99,6 +111,20 @@ _MARKETING_RISK_TERMS = (
     "一定有效",
 )
 _CAMPAIGN_TERMS = ("活动", "优惠", "赠品", "老带新", "金币", "奖学金")
+
+_MARKETING_RISK_TERMS += (
+    "\u9ec4\u91d1\u65f6\u671f",
+    "\u9ec4\u91d1\u671f",
+    "\u5173\u952e\u671f",
+    "\u4e8b\u534a\u529f\u500d",
+    "\u9886\u5148\u540c\u9f84",
+    "\u540d\u989d\u7d27\u5f20",
+    "\u5f88\u5212\u7b97",
+    "\u6027\u4ef7\u6bd4\u9ad8",
+    "\u54c8\u4f5b\u5927\u5b66\u513f\u7ae5\u53d1\u5c55\u4e2d\u5fc3",
+    "\u7d20\u517b\u4e0d\u80fd",
+    "\u7edd\u5bf9",
+)
 
 _RELATION_CUES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("suitable_for", ("适合", "适用学员")),
@@ -232,7 +258,11 @@ def _infer_usage(value: str, scope_status: str) -> tuple[str, str]:
         return "discarded", "内部经营、人员、排期或系统管理信息"
     if any(term in value for term in _MARKETING_RISK_TERMS):
         return "discarded", "无法核实的结果性营销主张"
-    if _PHONE_PATTERN.search(value) or _IDENTIFIER_PATTERN.search(value):
+    if (
+        _PHONE_PATTERN.search(value)
+        or _IDENTIFIER_PATTERN.search(value)
+        or _STAFF_PROFILE_PATTERN.search(value)
+    ):
         return "discarded", "真实联系方式、学员、订单或员工标识符"
     return "advisor", ""
 
