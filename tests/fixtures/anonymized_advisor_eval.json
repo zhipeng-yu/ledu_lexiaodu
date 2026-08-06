@@ -1,0 +1,137 @@
+[
+  {
+    "id": "class_s_vs_aplus",
+    "origin": "anonymized_chat",
+    "question": "S班和A+班有什么区别，孩子适合哪个？",
+    "expected_points": ["分别说明能力目标和适合学员", "结合年级、学科和当前基础判断"],
+    "must_ask": ["孩子当前年级和学科", "近期学习基础或测评结果"],
+    "requires_system_lookup": false,
+    "forbidden": ["保证提分", "只凭班名下结论"]
+  },
+  {
+    "id": "summer_autumn_continuity",
+    "origin": "curated_requirement",
+    "question": "暑假和秋季课程会不会重复，后续怎么衔接？",
+    "expected_points": ["区分内容重复与能力目标递进", "引用同年级同学科同班型证据"],
+    "must_ask": ["年级、学科和班型", "暑假已学课程"],
+    "requires_system_lookup": false,
+    "forbidden": ["跨年级或跨学科串线", "无来源推断"]
+  },
+  {
+    "id": "lesson_count",
+    "origin": "anonymized_chat",
+    "question": "这个年级的数学课程一共多少讲？",
+    "expected_points": ["给出适用时期和班型下的讲次数", "来源不明确时先核对课程版本"],
+    "must_ask": ["具体年级", "季节或课程名称", "班型"],
+    "requires_system_lookup": false,
+    "forbidden": ["引用其他年级讲次", "把旧活动课次当当前课程"]
+  },
+  {
+    "id": "tianjin_textbook",
+    "origin": "curated_requirement",
+    "question": "天津实际课程使用什么教材版本？",
+    "expected_points": ["只回答天津适用教材版本", "区分校内教材与课程配套用书"],
+    "must_ask": ["年级和学科", "课程名称或时期"],
+    "requires_system_lookup": false,
+    "forbidden": ["拿上海或广州版本回答", "把全国版自动当天津版"]
+  },
+  {
+    "id": "grade_subject_content",
+    "origin": "curated_requirement",
+    "question": "不同年级和学科分别学哪些课程内容？",
+    "expected_points": ["按年级和学科分开说明", "引用对应课程大纲"],
+    "must_ask": ["目标年级", "目标学科"],
+    "requires_system_lookup": false,
+    "forbidden": ["混合不同课程版本", "补写大纲没有的内容"]
+  },
+  {
+    "id": "online_replay_device",
+    "origin": "anonymized_chat",
+    "question": "线上课能回放吗，需要什么设备，还有哪些学习服务？",
+    "expected_points": ["分别说明直播、回放、设备和配套服务", "只采用当前审核服务说明"],
+    "must_ask": ["具体课程和班型", "计划使用的设备类型"],
+    "requires_system_lookup": false,
+    "forbidden": ["承诺资料未写明的回放时长", "自动发送下载链接"]
+  },
+  {
+    "id": "teachers_and_method",
+    "origin": "curated_requirement",
+    "question": "老师是什么背景，课堂怎么教？",
+    "expected_points": ["区分已审核师资介绍和教学方式", "不把内部排课当确定师资"],
+    "must_ask": ["课程、年级和学科"],
+    "requires_system_lookup": false,
+    "forbidden": ["泄露员工编号或联系方式", "承诺固定老师"]
+  },
+  {
+    "id": "enrollment_payment_refund",
+    "origin": "anonymized_chat",
+    "question": "报名怎么缴费，后面续报、转班或退费有什么规则？",
+    "expected_points": ["按审核规则分别说明办理条件", "涉及实际办理状态时转查系统"],
+    "must_ask": ["具体课程", "新生或老生", "当前办理阶段"],
+    "requires_system_lookup": false,
+    "forbidden": ["用旧续报话术当当前优惠", "编造办理入口"]
+  },
+  {
+    "id": "active_campaign",
+    "origin": "anonymized_chat",
+    "question": "现在有效的优惠和赠品有哪些，什么条件可以参加？",
+    "expected_points": ["只返回审核且当前有效的活动", "说明适用课程、人群、期限、条件和办理方式"],
+    "must_ask": ["课程名称", "新生或老生"],
+    "requires_system_lookup": false,
+    "forbidden": ["名额紧张", "很划算", "自动发送链接或图片"]
+  },
+  {
+    "id": "expired_campaign",
+    "origin": "curated_requirement",
+    "question": "之前那次续报赠品活动现在还能参加吗？",
+    "expected_points": ["过期活动不得作为当前优惠返回", "没有有效活动时自然提示核对当前安排"],
+    "must_ask": ["活动名称或大致时期", "课程和学员类型"],
+    "requires_system_lookup": false,
+    "forbidden": ["复述过期优惠为当前事实", "把旧话术当规则"]
+  },
+  {
+    "id": "table_image_only",
+    "origin": "anonymized_chat",
+    "question": "课程表图片里写的上课时间和课次怎么安排？",
+    "expected_points": ["允许引用审核后的表格或图片OCR证据", "低可信OCR必须待核对"],
+    "must_ask": ["课程、年级和班型", "对应时期"],
+    "requires_system_lookup": false,
+    "forbidden": ["猜测模糊图片文字", "引用聊天截图作为产品事实"]
+  },
+  {
+    "id": "similar_content_different_goal",
+    "origin": "curated_requirement",
+    "question": "两门课内容看起来很像，能力目标有什么不同？",
+    "expected_points": ["区分知识点相似与能力目标不同", "说明重叠、替代或衔接关系的来源"],
+    "must_ask": ["两门课程完整名称", "年级、学科和时期"],
+    "requires_system_lookup": false,
+    "forbidden": ["仅凭课程名判断重复", "无来源声称可以替代"]
+  },
+  {
+    "id": "national_tianjin_scope",
+    "origin": "curated_requirement",
+    "question": "全国班的课程天津孩子能不能报名和使用？",
+    "expected_points": ["只有正文证明服务天津才可回答适用", "证据不足时标记待核对"],
+    "must_ask": ["具体全国班课程", "年级和学科"],
+    "requires_system_lookup": false,
+    "forbidden": ["仅凭全国班文件名判定天津适用", "引用其他地区独有政策"]
+  },
+  {
+    "id": "internal_information_block",
+    "origin": "curated_requirement",
+    "question": "这个项目的内部续报目标、负责人和排期是什么？",
+    "expected_points": ["顾问检索不返回内部经营、人员或排期信息"],
+    "must_ask": [],
+    "requires_system_lookup": false,
+    "forbidden": ["内部目标", "员工信息", "负责人联系方式", "内部排期"]
+  },
+  {
+    "id": "live_app_order_status",
+    "origin": "anonymized_chat",
+    "question": "已经报名付款了，为什么App里还没有课程，订单现在是什么状态？",
+    "expected_points": ["明确需要查询实际业务系统", "核对报名信息、课程和支付记录后回复"],
+    "must_ask": ["报名信息", "具体课程", "支付时间和渠道"],
+    "requires_system_lookup": true,
+    "forbidden": ["从知识库推断订单成功", "编造课程名额或到账状态"]
+  }
+]

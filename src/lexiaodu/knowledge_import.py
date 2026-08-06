@@ -10,7 +10,7 @@ import uuid
 import zipfile
 from collections import Counter
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Iterable, Protocol
 from urllib.parse import urlsplit, urlunsplit
@@ -25,6 +25,15 @@ from lexiaodu.knowledge import (
     SourceBlock,
     chunk_block,
     tokenize,
+)
+from lexiaodu.knowledge_semantics import (
+    BUSINESS_DOMAINS,
+    RELATION_TYPES,
+    SEMANTIC_DECISIONS,
+    SEMANTIC_EXTRACTOR_VERSION,
+    SCOPE_STATUSES,
+    infer_semantic_candidates,
+    suggest_block_disposition,
 )
 from lexiaodu.ocr import MIN_TEXT_CONFIDENCE, OcrError, PaddleOcrEngine
 
@@ -119,9 +128,31 @@ class CoverageReport:
     no_text_block_count: int
     failed_block_count: int
     blocked_block_count: int
+    discarded_block_count: int
     image_count: int
     image_ocr_count: int
     by_kind: dict[str, int]
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticCoverageReport:
+    candidate_count: int
+    record_count: int
+    bound_record_count: int
+    binding_rate: float
+    approved_record_count: int
+    blocked_record_count: int
+    discarded_candidate_count: int
+    deferred_candidate_count: int
+    campaign_total_count: int
+    campaign_active_count: int
+    campaign_expired_count: int
+    campaign_pending_count: int
+    campaign_conflict_count: int
+    campaign_discarded_count: int
+    by_domain: dict[str, dict[str, int]]
+    by_relation: dict[str, int]
+    by_usage_status: dict[str, int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +163,7 @@ class PrepareReport:
     unchanged_count: int
     missing_source_count: int
     failed_count: int
+    excluded_count: int
     link_report: LinkReport
     review_path: Path
     report_path: Path
@@ -143,6 +175,7 @@ class ApplyReport:
     output_count: int
     indexed_document_count: int
     indexed_chunk_count: int
+    semantic_record_count: int
     link_report: LinkReport
 
 
@@ -1352,6 +1385,8 @@ def _schema(connection: sqlite3.Connection) -> None:
             text TEXT NOT NULL,
             audience TEXT NOT NULL DEFAULT 'pending',
             quality_status TEXT NOT NULL DEFAULT 'pending',
+            usage_status TEXT NOT NULL DEFAULT 'pending',
+            discard_reason TEXT NOT NULL DEFAULT '',
             authority TEXT NOT NULL DEFAULT 'reference',
             confidence REAL,
             warning TEXT NOT NULL DEFAULT '',
@@ -1380,6 +1415,101 @@ def _schema(connection: sqlite3.Connection) -> None:
             locator,
             terms
         );
+        CREATE TABLE IF NOT EXISTS semantic_revision_scans (
+            revision_id INTEGER NOT NULL
+                REFERENCES source_revisions(id) ON DELETE CASCADE,
+            extractor_version INTEGER NOT NULL,
+            batch_id TEXT NOT NULL,
+            scanned_at TEXT NOT NULL,
+            candidate_count INTEGER NOT NULL,
+            PRIMARY KEY (revision_id, extractor_version)
+        );
+        CREATE TABLE IF NOT EXISTS semantic_candidates (
+            id INTEGER PRIMARY KEY,
+            batch_id TEXT NOT NULL,
+            revision_id INTEGER NOT NULL
+                REFERENCES source_revisions(id) ON DELETE CASCADE,
+            block_id INTEGER NOT NULL
+                REFERENCES source_blocks(id) ON DELETE CASCADE,
+            candidate_key TEXT NOT NULL UNIQUE,
+            extractor_version INTEGER NOT NULL,
+            record_kind TEXT NOT NULL,
+            business_domain TEXT NOT NULL,
+            stage TEXT NOT NULL DEFAULT '',
+            grade TEXT NOT NULL DEFAULT '',
+            subject TEXT NOT NULL DEFAULT '',
+            course_name TEXT NOT NULL DEFAULT '',
+            period TEXT NOT NULL DEFAULT '',
+            class_type TEXT NOT NULL DEFAULT '',
+            textbook_version TEXT NOT NULL DEFAULT '',
+            fact_name TEXT NOT NULL DEFAULT '',
+            fact_value TEXT NOT NULL DEFAULT '',
+            statement TEXT NOT NULL DEFAULT '',
+            relation_type TEXT NOT NULL DEFAULT '',
+            campaign_name TEXT NOT NULL DEFAULT '',
+            campaign_start TEXT NOT NULL DEFAULT '',
+            campaign_end TEXT NOT NULL DEFAULT '',
+            campaign_status TEXT NOT NULL DEFAULT '',
+            scope_status TEXT NOT NULL DEFAULT 'pending',
+            suggested_usage_status TEXT NOT NULL DEFAULT 'pending',
+            discard_reason TEXT NOT NULL DEFAULT '',
+            conflict_key TEXT NOT NULL DEFAULT '',
+            payload_json TEXT NOT NULL,
+            decision TEXT NOT NULL DEFAULT 'pending',
+            review_reason TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS semantic_candidates_revision
+            ON semantic_candidates(revision_id, decision);
+        CREATE INDEX IF NOT EXISTS semantic_candidates_conflict
+            ON semantic_candidates(conflict_key);
+        CREATE TABLE IF NOT EXISTS semantic_records (
+            id INTEGER PRIMARY KEY,
+            candidate_id INTEGER NOT NULL
+                REFERENCES semantic_candidates(id),
+            source_revision_id INTEGER NOT NULL
+                REFERENCES source_revisions(id),
+            source_block_id INTEGER NOT NULL
+                REFERENCES source_blocks(id),
+            record_kind TEXT NOT NULL,
+            business_domain TEXT NOT NULL,
+            stage TEXT NOT NULL DEFAULT '',
+            grade TEXT NOT NULL DEFAULT '',
+            subject TEXT NOT NULL DEFAULT '',
+            course_name TEXT NOT NULL DEFAULT '',
+            period TEXT NOT NULL DEFAULT '',
+            class_type TEXT NOT NULL DEFAULT '',
+            textbook_version TEXT NOT NULL DEFAULT '',
+            fact_name TEXT NOT NULL DEFAULT '',
+            fact_value TEXT NOT NULL DEFAULT '',
+            statement TEXT NOT NULL DEFAULT '',
+            relation_type TEXT NOT NULL DEFAULT '',
+            campaign_name TEXT NOT NULL DEFAULT '',
+            campaign_start TEXT NOT NULL DEFAULT '',
+            campaign_end TEXT NOT NULL DEFAULT '',
+            campaign_status TEXT NOT NULL DEFAULT '',
+            conflict_key TEXT NOT NULL DEFAULT '',
+            scope_status TEXT NOT NULL,
+            audience TEXT NOT NULL,
+            authority TEXT NOT NULL,
+            quality_status TEXT NOT NULL,
+            record_status TEXT NOT NULL DEFAULT 'approved',
+            payload_json TEXT NOT NULL,
+            applied_at TEXT NOT NULL,
+            UNIQUE(candidate_id, record_status)
+        );
+        CREATE INDEX IF NOT EXISTS semantic_records_active
+            ON semantic_records(record_status, quality_status, audience,
+                                scope_status, campaign_status);
+        CREATE INDEX IF NOT EXISTS semantic_records_filters
+            ON semantic_records(grade, subject, class_type, period,
+                                textbook_version);
+        CREATE TABLE IF NOT EXISTS policy_semantic_links (
+            knowledge_path TEXT NOT NULL,
+            semantic_record_id INTEGER NOT NULL
+                REFERENCES semantic_records(id) ON DELETE CASCADE,
+            PRIMARY KEY (knowledge_path, semantic_record_id)
+        );
         """
     )
     cache_columns = {
@@ -1389,6 +1519,40 @@ def _schema(connection: sqlite3.Connection) -> None:
     if "confidence" not in cache_columns:
         connection.execute(
             "ALTER TABLE image_ocr_cache ADD COLUMN confidence REAL"
+        )
+    block_columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(source_blocks)")
+    }
+    usage_status_added = False
+    if "usage_status" not in block_columns:
+        connection.execute(
+            "ALTER TABLE source_blocks ADD COLUMN usage_status TEXT NOT NULL DEFAULT 'pending'"
+        )
+        usage_status_added = True
+    if "discard_reason" not in block_columns:
+        connection.execute(
+            "ALTER TABLE source_blocks ADD COLUMN discard_reason TEXT NOT NULL DEFAULT ''"
+        )
+    semantic_columns = {
+        str(row[1])
+        for row in connection.execute("PRAGMA table_info(semantic_records)")
+    }
+    if "conflict_key" not in semantic_columns:
+        connection.execute(
+            "ALTER TABLE semantic_records ADD COLUMN conflict_key TEXT NOT NULL DEFAULT ''"
+        )
+    if usage_status_added:
+        connection.execute(
+            """
+            UPDATE source_blocks
+            SET usage_status = CASE
+                WHEN quality_status = 'no_text' THEN 'no_text'
+                WHEN quality_status = 'failed' THEN 'failed'
+                WHEN quality_status = 'approved' AND audience = 'advisor' THEN 'advisor'
+                WHEN quality_status = 'approved' AND audience = 'internal' THEN 'internal'
+                ELSE 'pending'
+            END
+            """
         )
 
 
@@ -1768,12 +1932,20 @@ def _store_source_revision(
             quality = "failed"
         else:
             quality = "no_text"
+        usage_status = (
+            "failed"
+            if quality == "failed"
+            else "no_text"
+            if quality == "no_text"
+            else "pending"
+        )
         cursor = connection.execute(
             """
             INSERT INTO source_blocks (
                 revision_id, block_index, block_key, locator, kind, text,
-                audience, quality_status, authority, confidence, warning
-            ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, 'reference', ?, ?)
+                audience, quality_status, usage_status, authority,
+                confidence, warning
+            ) VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, 'reference', ?, ?)
             """,
             (
                 revision_id,
@@ -1783,6 +1955,7 @@ def _store_source_revision(
                 block.kind,
                 block.text,
                 quality,
+                usage_status,
                 block.confidence,
                 block.warning,
             ),
@@ -1805,6 +1978,470 @@ def _store_source_revision(
     return revision_id
 
 
+def _ensure_semantic_scan(
+    connection: sqlite3.Connection,
+    *,
+    batch_id: str,
+    source_name: str,
+    revision_id: int,
+) -> int:
+    scanned = connection.execute(
+        """
+        SELECT candidate_count FROM semantic_revision_scans
+        WHERE revision_id = ? AND extractor_version = ?
+        """,
+        (revision_id, SEMANTIC_EXTRACTOR_VERSION),
+    ).fetchone()
+    if scanned is not None:
+        return int(scanned["candidate_count"])
+    candidate_count = 0
+    rows = connection.execute(
+        """
+        SELECT id, block_key, locator, text
+        FROM source_blocks
+        WHERE revision_id = ?
+        ORDER BY block_index
+        """,
+        (revision_id,),
+    ).fetchall()
+    source_name = str(
+        connection.execute(
+            """
+            SELECT source.name
+            FROM source_revisions AS revision
+            JOIN source_files AS source ON source.id = revision.source_id
+            WHERE revision.id = ?
+            """,
+            (revision_id,),
+        ).fetchone()[0]
+    )
+    for row in rows:
+        candidates = infer_semantic_candidates(
+            source_name=source_name,
+            revision_id=revision_id,
+            block_id=int(row["id"]),
+            block_key=str(row["block_key"]),
+            locator=str(row["locator"]),
+            text=str(row["text"]),
+        )
+        for candidate in candidates:
+            payload = candidate.to_dict()
+            connection.execute(
+                """
+                INSERT INTO semantic_candidates (
+                    batch_id, revision_id, block_id, candidate_key,
+                    extractor_version, record_kind, business_domain,
+                    stage, grade, subject, course_name, period, class_type,
+                    textbook_version, fact_name, fact_value, statement,
+                    relation_type, campaign_name, campaign_start, campaign_end,
+                    campaign_status, scope_status, suggested_usage_status,
+                    discard_reason, conflict_key, payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    batch_id,
+                    revision_id,
+                    int(row["id"]),
+                    candidate.candidate_key,
+                    SEMANTIC_EXTRACTOR_VERSION,
+                    candidate.record_kind,
+                    candidate.business_domain,
+                    candidate.stage,
+                    candidate.grade,
+                    candidate.subject,
+                    candidate.course_name,
+                    candidate.period,
+                    candidate.class_type,
+                    candidate.textbook_version,
+                    candidate.fact_name,
+                    candidate.fact_value,
+                    candidate.statement,
+                    candidate.relation_type,
+                    candidate.campaign_name,
+                    candidate.campaign_start,
+                    candidate.campaign_end,
+                    candidate.campaign_status,
+                    candidate.scope_status,
+                    candidate.suggested_usage_status,
+                    candidate.discard_reason,
+                    candidate.conflict_key,
+                    json.dumps(payload, ensure_ascii=False),
+                    _utc_now(),
+                ),
+            )
+            candidate_count += 1
+    connection.execute(
+        """
+        INSERT INTO semantic_revision_scans (
+            revision_id, extractor_version, batch_id, scanned_at,
+            candidate_count
+        ) VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            revision_id,
+            SEMANTIC_EXTRACTOR_VERSION,
+            batch_id,
+            _utc_now(),
+            candidate_count,
+        ),
+    )
+    return candidate_count
+
+
+def _semantic_review_records(
+    connection: sqlite3.Connection, revision_id: int
+) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for row in connection.execute(
+        """
+        SELECT id, candidate_key, block_id, payload_json, decision,
+               review_reason
+        FROM semantic_candidates
+        WHERE revision_id = ? AND extractor_version = ?
+        ORDER BY block_id, id
+        """,
+        (revision_id, SEMANTIC_EXTRACTOR_VERSION),
+    ):
+        payload = json.loads(str(row["payload_json"]))
+        result.append(
+            {
+                "candidate_id": int(row["id"]),
+                "candidate_key": str(row["candidate_key"]),
+                "source_revision_id": revision_id,
+                "source_block_id": int(row["block_id"]),
+                "decision": str(row["decision"]),
+                "reason": str(row["review_reason"]),
+                "record": payload,
+            }
+        )
+    return result
+
+
+def _campaign_status(payload: dict[str, Any], applied_on: date) -> str:
+    required_fields = (
+        "campaign_name",
+        "campaign_content",
+        "campaign_scope",
+        "campaign_student_scope",
+        "campaign_terms",
+        "campaign_fulfillment",
+    )
+    if any(not str(payload.get(field, "")).strip() for field in required_fields):
+        return "pending"
+    start_text = str(payload.get("campaign_start", "")).strip()
+    end_text = str(payload.get("campaign_end", "")).strip()
+    if not start_text or not end_text:
+        return "pending"
+    try:
+        start = date.fromisoformat(start_text)
+        end = date.fromisoformat(end_text)
+    except ValueError:
+        return "pending"
+    if end < start:
+        return "conflict"
+    if end < applied_on:
+        return "expired"
+    if start > applied_on:
+        return "pending"
+    return "active"
+
+
+def _validate_semantic_review(
+    connection: sqlite3.Connection,
+    revision_id: int,
+    decision: dict[str, Any],
+) -> list[tuple[sqlite3.Row, dict[str, Any], str, str]]:
+    semantic = decision.get("semantic", {})
+    if not isinstance(semantic, dict):
+        raise KnowledgeImportError("语义审核配置必须是对象")
+    reviewed = semantic.get("records", [])
+    if not isinstance(reviewed, list):
+        raise KnowledgeImportError("语义审核记录必须是数组")
+    candidate_rows = connection.execute(
+        """
+        SELECT * FROM semantic_candidates
+        WHERE revision_id = ? AND extractor_version = ?
+        ORDER BY id
+        """,
+        (revision_id, SEMANTIC_EXTRACTOR_VERSION),
+    ).fetchall()
+    reviews = {
+        int(item.get("candidate_id", 0)): item
+        for item in reviewed
+        if isinstance(item, dict)
+    }
+    expected_ids = {int(row["id"]) for row in candidate_rows}
+    if len(reviewed) != len(expected_ids) or set(reviews) != expected_ids:
+        raise KnowledgeImportError("语义审核记录与本次候选不完整或不匹配")
+    validated: list[tuple[sqlite3.Row, dict[str, Any], str, str]] = []
+    for row in candidate_rows:
+        item = reviews[int(row["id"])]
+        if str(item.get("candidate_key", "")) != str(row["candidate_key"]):
+            raise KnowledgeImportError("语义候选键与数据库不匹配")
+        if int(item.get("source_revision_id", 0)) != revision_id:
+            raise KnowledgeImportError("语义候选来源修订绑定无效")
+        if int(item.get("source_block_id", 0)) != int(row["block_id"]):
+            raise KnowledgeImportError("语义候选来源块绑定无效")
+        review_decision = str(item.get("decision", "")).strip()
+        if review_decision not in SEMANTIC_DECISIONS - {"pending"}:
+            raise KnowledgeImportError("语义候选尚未完成审核")
+        reason = str(item.get("reason", "")).strip()
+        if review_decision in {"blocked", "discarded", "deferred"} and not reason:
+            raise KnowledgeImportError("阻断、舍弃或待核对的语义候选必须填写原因")
+        payload = item.get("record")
+        if not isinstance(payload, dict):
+            raise KnowledgeImportError("语义候选记录必须是对象")
+        record_kind = str(payload.get("record_kind", ""))
+        if record_kind not in {"fact", "relation", "campaign"}:
+            raise KnowledgeImportError("语义候选记录类型无效")
+        if str(payload.get("business_domain", "")) not in BUSINESS_DOMAINS:
+            raise KnowledgeImportError("语义候选业务领域无效")
+        relation_type = str(payload.get("relation_type", ""))
+        if relation_type and relation_type not in RELATION_TYPES:
+            raise KnowledgeImportError("语义候选关系类型无效")
+        if record_kind == "relation" and not relation_type:
+            raise KnowledgeImportError("课程关系候选缺少关系类型")
+        if record_kind != "relation" and relation_type:
+            raise KnowledgeImportError("非关系候选不能设置关系类型")
+        if str(payload.get("scope_status", "")) not in SCOPE_STATUSES:
+            raise KnowledgeImportError("语义候选天津适用状态无效")
+        validated.append((row, payload, review_decision, reason))
+    return validated
+
+
+def _validate_semantic_conflicts(
+    connection: sqlite3.Connection,
+    reviewed: Iterable[
+        tuple[int, sqlite3.Row, dict[str, Any], str, str]
+    ],
+) -> None:
+    reviewed_items = list(reviewed)
+    replaced_source_ids = {item[0] for item in reviewed_items}
+    groups: dict[str, dict[int, set[str]]] = {}
+
+    def add(
+        source_id: int,
+        conflict_key: str,
+        payload: dict[str, Any],
+        quality: str,
+    ) -> None:
+        if not conflict_key or quality != "approved":
+            return
+        record_kind = str(payload.get("record_kind", ""))
+        fact_name = str(payload.get("fact_name", ""))
+        if record_kind != "campaign" and fact_name not in {
+            "lesson_count",
+            "price",
+            "textbook_version",
+        }:
+            return
+        if record_kind == "campaign" and _campaign_status(
+            payload, date.today()
+        ) != "active":
+            return
+        value = (
+            "|".join(
+                (
+                    str(payload.get("campaign_start", "")),
+                    str(payload.get("campaign_end", "")),
+                    str(payload.get("campaign_terms", "")),
+                )
+            )
+            if record_kind == "campaign"
+            else str(payload.get("fact_value", ""))
+        ).strip()
+        if value:
+            groups.setdefault(conflict_key, {}).setdefault(source_id, set()).add(
+                value
+            )
+
+    for row in connection.execute(
+        """
+        SELECT record.conflict_key, record.payload_json, record.quality_status,
+               revision.source_id
+        FROM semantic_records AS record
+        JOIN source_revisions AS revision
+          ON revision.id = record.source_revision_id
+        WHERE record.record_status = 'approved'
+        """
+    ):
+        source_id = int(row["source_id"])
+        if source_id in replaced_source_ids:
+            continue
+        add(
+            source_id,
+            str(row["conflict_key"]),
+            json.loads(str(row["payload_json"])),
+            str(row["quality_status"]),
+        )
+    for source_id, row, payload, review_decision, _ in reviewed_items:
+        block = connection.execute(
+            """
+            SELECT quality_status, usage_status
+            FROM source_blocks WHERE id = ?
+            """,
+            (int(row["block_id"]),),
+        ).fetchone()
+        usable = bool(
+            block is not None
+            and block["quality_status"] == "approved"
+            and block["usage_status"] == "advisor"
+            and str(payload.get("scope_status", ""))
+            in {"tianjin", "tianjin_compatible"}
+        )
+        add(
+            source_id,
+            str(row["conflict_key"]),
+            payload,
+            (
+                "approved"
+                if review_decision == "approved" and usable
+                else "blocked"
+            ),
+        )
+    conflicts = [
+        key
+        for key, sources in groups.items()
+        if len(sources) > 1
+        and len({value for values in sources.values() for value in values}) > 1
+    ]
+    if conflicts:
+        raise KnowledgeImportError(
+            f"存在 {len(conflicts)} 组未解决的结构化事实或活动冲突"
+        )
+
+
+def _apply_semantic_review(
+    connection: sqlite3.Connection,
+    revision_id: int,
+    decision: dict[str, Any],
+    outputs: Iterable[str],
+    applied_on: date,
+) -> int:
+    validated = _validate_semantic_review(connection, revision_id, decision)
+    source_id = int(
+        connection.execute(
+            "SELECT source_id FROM source_revisions WHERE id = ?", (revision_id,)
+        ).fetchone()[0]
+    )
+    old_record_ids = [
+        int(row[0])
+        for row in connection.execute(
+            """
+            SELECT record.id
+            FROM semantic_records AS record
+            JOIN source_revisions AS revision
+              ON revision.id = record.source_revision_id
+            WHERE revision.source_id = ? AND record.record_status = 'approved'
+            """,
+            (source_id,),
+        )
+    ]
+    if old_record_ids:
+        connection.executemany(
+            "UPDATE semantic_records SET record_status = 'superseded' WHERE id = ?",
+            ((record_id,) for record_id in old_record_ids),
+        )
+    applied_count = 0
+    for row, payload, review_decision, reason in validated:
+        connection.execute(
+            """
+            UPDATE semantic_candidates SET decision = ?, review_reason = ?
+            WHERE id = ?
+            """,
+            (review_decision, reason, int(row["id"])),
+        )
+        if review_decision in {"discarded", "deferred"}:
+            continue
+        block = connection.execute(
+            """
+            SELECT revision_id, audience, authority, quality_status, usage_status
+            FROM source_blocks WHERE id = ?
+            """,
+            (int(row["block_id"]),),
+        ).fetchone()
+        if block is None or int(block["revision_id"]) != revision_id:
+            raise KnowledgeImportError("语义记录绑定的来源块不存在")
+        scope_status = str(payload.get("scope_status", ""))
+        campaign_status = ""
+        if str(payload.get("record_kind", "")) == "campaign":
+            campaign_status = _campaign_status(payload, applied_on)
+        quality = "approved"
+        if (
+            review_decision == "blocked"
+            or block["quality_status"] != "approved"
+            or block["usage_status"] != "advisor"
+            or scope_status not in {"tianjin", "tianjin_compatible"}
+            or (campaign_status and campaign_status != "active")
+        ):
+            quality = "blocked"
+        if campaign_status and campaign_status != "active":
+            connection.execute(
+                """
+                UPDATE source_blocks
+                SET quality_status = 'blocked', usage_status = 'pending'
+                WHERE id = ?
+                """,
+                (int(row["block_id"]),),
+            )
+        cursor = connection.execute(
+            """
+            INSERT INTO semantic_records (
+                candidate_id, source_revision_id, source_block_id,
+                record_kind, business_domain, stage, grade, subject,
+                course_name, period, class_type, textbook_version,
+                fact_name, fact_value, statement, relation_type,
+                campaign_name, campaign_start, campaign_end, campaign_status,
+                conflict_key, scope_status, audience, authority, quality_status,
+                record_status, payload_json, applied_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                      ?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?)
+            """,
+            (
+                int(row["id"]),
+                revision_id,
+                int(row["block_id"]),
+                str(payload.get("record_kind", "fact")),
+                str(payload.get("business_domain", "")),
+                str(payload.get("stage", "")),
+                str(payload.get("grade", "")),
+                str(payload.get("subject", "")),
+                str(payload.get("course_name", "")),
+                str(payload.get("period", "")),
+                str(payload.get("class_type", "")),
+                str(payload.get("textbook_version", "")),
+                str(payload.get("fact_name", "")),
+                str(payload.get("fact_value", "")),
+                str(payload.get("statement", "")),
+                str(payload.get("relation_type", "")),
+                str(payload.get("campaign_name", "")),
+                str(payload.get("campaign_start", "")),
+                str(payload.get("campaign_end", "")),
+                campaign_status,
+                str(row["conflict_key"] or ""),
+                scope_status,
+                str(block["audience"]),
+                str(block["authority"]),
+                quality,
+                json.dumps(payload, ensure_ascii=False),
+                _utc_now(),
+            ),
+        )
+        semantic_record_id = int(cursor.lastrowid)
+        if quality == "approved":
+            connection.executemany(
+                """
+                INSERT INTO policy_semantic_links (
+                    knowledge_path, semantic_record_id
+                ) VALUES (?, ?)
+                """,
+                ((str(output), semantic_record_id) for output in outputs),
+            )
+        applied_count += 1
+    return applied_count
+
+
 def _apply_source_review(
     connection: sqlite3.Connection,
     revision_id: int,
@@ -1824,6 +2461,9 @@ def _apply_source_review(
     authority = str(raw.get("authority", "reference")).strip()
     if authority not in {"primary", "reference"}:
         raise KnowledgeImportError("原文权威等级必须是 primary 或 reference")
+    default_usage = str(raw.get("usage_status") or audience).strip()
+    if default_usage not in {"advisor", "internal"}:
+        raise KnowledgeImportError("原文处置状态必须是 advisor 或 internal")
     internal_locators = {
         str(value) for value in raw.get("internal_locators", [])
     }
@@ -1832,11 +2472,23 @@ def _apply_source_review(
         raise KnowledgeImportError("原文块覆盖配置必须是对象")
     rows = connection.execute(
         """
-        SELECT id, block_key, locator, kind, text, quality_status
+        SELECT id, block_key, locator, kind, text, quality_status,
+               usage_status, discard_reason
         FROM source_blocks WHERE revision_id = ?
         """,
         (revision_id,),
     ).fetchall()
+    source_name = str(
+        connection.execute(
+            """
+            SELECT source.name
+            FROM source_revisions AS revision
+            JOIN source_files AS source ON source.id = revision.source_id
+            WHERE revision.id = ?
+            """,
+            (revision_id,),
+        ).fetchone()[0]
+    )
     for row in rows:
         block_audience = (
             "internal"
@@ -1844,6 +2496,8 @@ def _apply_source_review(
             or row["kind"] == "revision_deleted"
             else audience
         )
+        usage_status = "internal" if block_audience == "internal" else default_usage
+        discard_reason = str(row["discard_reason"] or "")
         quality = row["quality_status"]
         if row["text"] and quality == "pending":
             quality = "approved"
@@ -1855,17 +2509,73 @@ def _apply_source_review(
                 override.get("audience", block_audience)
             )
             quality = str(override.get("quality_status", quality))
+            usage_status = str(
+                override.get("usage_status", usage_status)
+            ).strip()
+            discard_reason = str(
+                override.get("discard_reason", discard_reason)
+            ).strip()
+        suggested_usage, suggested_reason, suggested_scope = (
+            suggest_block_disposition(
+                source_name=source_name,
+                locator=str(row["locator"]),
+                text=str(row["text"]),
+            )
+        )
+        reviewed_scope = str(
+            override.get("scope_status", suggested_scope)
+            if isinstance(override, dict)
+            else suggested_scope
+        ).strip()
+        if reviewed_scope not in SCOPE_STATUSES:
+            raise KnowledgeImportError("原文块天津适用状态无效")
+        if suggested_usage == "discarded":
+            usage_status = "discarded"
+            discard_reason = suggested_reason
+        elif suggested_usage == "pending" and reviewed_scope not in {
+            "tianjin",
+            "tianjin_compatible",
+        }:
+            usage_status = "pending"
+            discard_reason = discard_reason or suggested_reason
         if block_audience not in {"advisor", "internal"}:
             raise KnowledgeImportError("原文块受众无效")
         if quality not in {"approved", "no_text", "failed", "blocked"}:
             raise KnowledgeImportError("原文块质量状态无效")
+        if quality == "no_text":
+            usage_status = "no_text"
+        elif quality == "failed":
+            usage_status = "failed"
+        elif quality == "blocked" and usage_status == "advisor":
+            usage_status = "pending"
+        if usage_status not in {
+            "advisor",
+            "internal",
+            "pending",
+            "discarded",
+            "no_text",
+            "failed",
+        }:
+            raise KnowledgeImportError("原文块处置状态无效")
+        if usage_status == "discarded" and not discard_reason:
+            raise KnowledgeImportError("舍弃原文块必须填写舍弃原因")
+        if usage_status == "advisor" and block_audience != "advisor":
+            raise KnowledgeImportError("顾问可用原文块必须面向顾问")
         connection.execute(
             """
             UPDATE source_blocks
-            SET audience = ?, quality_status = ?, authority = ?
+            SET audience = ?, quality_status = ?, usage_status = ?,
+                discard_reason = ?, authority = ?
             WHERE id = ?
             """,
-            (block_audience, quality, authority, row["id"]),
+            (
+                block_audience,
+                quality,
+                usage_status,
+                discard_reason,
+                authority,
+                row["id"],
+            ),
         )
     source_id = connection.execute(
         "SELECT source_id FROM source_revisions WHERE id = ?",
@@ -1899,7 +2609,11 @@ def _rebuild_source_fts(connection: sqlite3.Connection) -> None:
         JOIN source_files AS source ON source.id = revision.source_id
         WHERE revision.status = 'approved'
           AND block.quality_status = 'approved'
-          AND block.audience IN ('advisor', 'internal')
+          AND (
+            (block.audience = 'advisor' AND block.usage_status = 'advisor')
+            OR
+            (block.audience = 'internal' AND block.usage_status = 'internal')
+          )
         ORDER BY chunk.id
         """
     ).fetchall()
@@ -1935,13 +2649,15 @@ def _coverage_report(connection: sqlite3.Connection) -> CoverageReport:
           COALESCE(SUM(CASE WHEN revision.status = 'approved'
                             AND block.audience = 'advisor'
                             AND block.quality_status = 'approved'
+                            AND block.usage_status = 'advisor'
                        THEN LENGTH(block.text) ELSE 0 END), 0) AS searchable_chars,
-          COUNT(DISTINCT CASE WHEN block.audience = 'advisor' THEN block.id END) AS advisor_blocks,
-          COUNT(DISTINCT CASE WHEN block.audience = 'internal' THEN block.id END) AS internal_blocks,
-          COUNT(DISTINCT CASE WHEN block.audience = 'pending' THEN block.id END) AS pending_blocks,
+          COUNT(DISTINCT CASE WHEN block.usage_status = 'advisor' THEN block.id END) AS advisor_blocks,
+          COUNT(DISTINCT CASE WHEN block.usage_status = 'internal' THEN block.id END) AS internal_blocks,
+          COUNT(DISTINCT CASE WHEN block.usage_status = 'pending' THEN block.id END) AS pending_blocks,
           COUNT(DISTINCT CASE WHEN block.quality_status = 'no_text' THEN block.id END) AS no_text_blocks,
           COUNT(DISTINCT CASE WHEN block.quality_status = 'failed' THEN block.id END) AS failed_blocks,
           COUNT(DISTINCT CASE WHEN block.quality_status = 'blocked' THEN block.id END) AS blocked_blocks,
+          COUNT(DISTINCT CASE WHEN block.usage_status = 'discarded' THEN block.id END) AS discarded_blocks,
           COUNT(DISTINCT CASE WHEN block.kind IN ('image_ocr', 'image_no_text') THEN block.id END) AS image_count,
           COUNT(DISTINCT CASE WHEN block.kind = 'image_ocr' THEN block.id END) AS image_ocr_count
         FROM source_files AS source
@@ -1974,9 +2690,145 @@ def _coverage_report(connection: sqlite3.Connection) -> CoverageReport:
         no_text_block_count=int(row["no_text_blocks"]),
         failed_block_count=int(row["failed_blocks"]),
         blocked_block_count=int(row["blocked_blocks"]),
+        discarded_block_count=int(row["discarded_blocks"]),
         image_count=int(row["image_count"]),
         image_ocr_count=int(row["image_ocr_count"]),
         by_kind={str(key): int(value) for key, value in by_kind.items()},
+    )
+
+
+def _semantic_coverage_report(
+    connection: sqlite3.Connection,
+) -> SemanticCoverageReport:
+    candidate_row = connection.execute(
+        """
+        SELECT COUNT(*) AS total,
+               SUM(CASE WHEN decision = 'discarded' THEN 1 ELSE 0 END) AS discarded,
+               SUM(CASE WHEN decision = 'deferred' THEN 1 ELSE 0 END) AS deferred
+        FROM semantic_candidates
+        """
+    ).fetchone()
+    record_row = connection.execute(
+        """
+        SELECT SUM(CASE WHEN record_status = 'approved' THEN 1 ELSE 0 END) AS total,
+               SUM(CASE WHEN record_status = 'approved'
+                         AND source_revision_id IS NOT NULL
+                         AND source_block_id IS NOT NULL THEN 1 ELSE 0 END) AS bound,
+               SUM(CASE WHEN quality_status = 'approved'
+                         AND record_status = 'approved' THEN 1 ELSE 0 END) AS approved,
+               SUM(CASE WHEN quality_status = 'blocked'
+                         AND record_status = 'approved' THEN 1 ELSE 0 END) AS blocked,
+               SUM(CASE WHEN record_kind = 'campaign'
+                         AND record_status = 'approved' THEN 1 ELSE 0 END) AS campaigns,
+               SUM(CASE WHEN campaign_status = 'active'
+                         AND record_status = 'approved' THEN 1 ELSE 0 END) AS active,
+               SUM(CASE WHEN campaign_status = 'expired'
+                         AND record_status = 'approved' THEN 1 ELSE 0 END) AS expired,
+               SUM(CASE WHEN campaign_status = 'pending'
+                         AND record_status = 'approved' THEN 1 ELSE 0 END) AS pending,
+               SUM(CASE WHEN campaign_status = 'conflict'
+                         AND record_status = 'approved' THEN 1 ELSE 0 END) AS conflict
+        FROM semantic_records
+        """
+    ).fetchone()
+    by_domain: dict[str, dict[str, int]] = {}
+    for domain in BUSINESS_DOMAINS:
+        row = connection.execute(
+            """
+            SELECT
+              COUNT(DISTINCT source.id) AS files,
+              COUNT(DISTINCT candidate.block_id) AS blocks,
+              COUNT(DISTINCT candidate.id) AS candidates,
+              COUNT(DISTINCT CASE WHEN record.record_status = 'approved'
+                                  THEN record.id END) AS records
+            FROM semantic_candidates AS candidate
+            JOIN source_revisions AS revision
+              ON revision.id = candidate.revision_id
+            JOIN source_files AS source ON source.id = revision.source_id
+            LEFT JOIN semantic_records AS record
+              ON record.candidate_id = candidate.id
+            WHERE candidate.business_domain = ?
+            """,
+            (domain,),
+        ).fetchone()
+        by_domain[domain] = {
+            "files": int(row["files"] or 0),
+            "blocks": int(row["blocks"] or 0),
+            "candidates": int(row["candidates"] or 0),
+            "records": int(row["records"] or 0),
+        }
+    by_relation = {
+        str(key): int(value)
+        for key, value in connection.execute(
+            """
+            SELECT relation_type, COUNT(*)
+            FROM semantic_records
+            WHERE record_status = 'approved' AND relation_type <> ''
+            GROUP BY relation_type ORDER BY relation_type
+            """
+        )
+    }
+    by_usage = {
+        str(key): int(value)
+        for key, value in connection.execute(
+            """
+            SELECT usage_status, COUNT(*) FROM source_blocks
+            GROUP BY usage_status ORDER BY usage_status
+            """
+        )
+    }
+    campaign_statuses = Counter()
+    for row in connection.execute(
+        """
+        SELECT candidate.decision, candidate.payload_json,
+               record.campaign_status AS applied_status,
+               record.payload_json AS applied_payload
+        FROM semantic_candidates AS candidate
+        LEFT JOIN semantic_records AS record
+          ON record.id = (
+              SELECT MAX(current.id)
+              FROM semantic_records AS current
+              WHERE current.candidate_id = candidate.id
+                AND current.record_status = 'approved'
+          )
+        WHERE candidate.record_kind = 'campaign'
+        """
+    ):
+        decision = str(row["decision"])
+        if decision == "discarded":
+            campaign_statuses["discarded"] += 1
+            continue
+        if decision in {"pending", "deferred", "blocked"}:
+            campaign_statuses["pending"] += 1
+            continue
+        stored_status = str(row["applied_status"] or "")
+        payload_json = row["applied_payload"] or row["payload_json"]
+        current_status = (
+            "conflict"
+            if stored_status == "conflict"
+            else _campaign_status(json.loads(str(payload_json)), date.today())
+        )
+        campaign_statuses[current_status] += 1
+    record_count = int(record_row["total"] or 0)
+    bound_count = int(record_row["bound"] or 0)
+    return SemanticCoverageReport(
+        candidate_count=int(candidate_row["total"] or 0),
+        record_count=record_count,
+        bound_record_count=bound_count,
+        binding_rate=(bound_count / record_count if record_count else 1.0),
+        approved_record_count=int(record_row["approved"] or 0),
+        blocked_record_count=int(record_row["blocked"] or 0),
+        discarded_candidate_count=int(candidate_row["discarded"] or 0),
+        deferred_candidate_count=int(candidate_row["deferred"] or 0),
+        campaign_total_count=sum(campaign_statuses.values()),
+        campaign_active_count=campaign_statuses["active"],
+        campaign_expired_count=campaign_statuses["expired"],
+        campaign_pending_count=campaign_statuses["pending"],
+        campaign_conflict_count=campaign_statuses["conflict"],
+        campaign_discarded_count=campaign_statuses["discarded"],
+        by_domain=by_domain,
+        by_relation=by_relation,
+        by_usage_status=by_usage,
     )
 
 
@@ -2008,6 +2860,87 @@ def _current_quality_issues(
     ]
 
 
+def _current_discarded_objects(
+    connection: sqlite3.Connection,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "source": str(row["source"]),
+            "locator": str(row["locator"]),
+            "kind": str(row["kind"]),
+            "discard_reason": str(row["discard_reason"]),
+            "preview": str(row["text"])[:160],
+        }
+        for row in connection.execute(
+            """
+            SELECT source.name AS source, block.locator, block.kind,
+                   block.discard_reason, block.text
+            FROM source_blocks AS block
+            JOIN source_revisions AS revision
+              ON revision.id = block.revision_id
+            JOIN source_files AS source ON source.id = revision.source_id
+            WHERE revision.status IN ('approved', 'pending')
+              AND block.usage_status = 'discarded'
+            ORDER BY source.name, block.block_index
+            """
+        )
+    ]
+
+
+def _current_semantic_conflicts(
+    connection: sqlite3.Connection,
+) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, set[str]]] = {}
+    for row in connection.execute(
+        """
+        SELECT candidate.conflict_key, candidate.record_kind,
+               candidate.fact_name, candidate.fact_value,
+               candidate.payload_json, source.name
+        FROM semantic_candidates AS candidate
+        JOIN source_revisions AS revision
+          ON revision.id = candidate.revision_id
+        JOIN source_files AS source ON source.id = revision.source_id
+        WHERE revision.status IN ('approved', 'pending')
+          AND candidate.conflict_key <> ''
+        """
+    ):
+        record_kind = str(row["record_kind"])
+        fact_name = str(row["fact_name"])
+        if record_kind != "campaign" and fact_name not in {
+            "lesson_count",
+            "price",
+            "textbook_version",
+        }:
+            continue
+        payload = json.loads(str(row["payload_json"]))
+        value = (
+            "|".join(
+                (
+                    str(payload.get("campaign_start", "")),
+                    str(payload.get("campaign_end", "")),
+                    str(payload.get("campaign_terms", "")),
+                )
+            )
+            if record_kind == "campaign"
+            else str(row["fact_value"])
+        ).strip()
+        if value:
+            grouped.setdefault(str(row["conflict_key"]), {}).setdefault(
+                str(row["name"]), set()
+            ).add(value)
+    return [
+        {
+            "conflict_key": key,
+            "sources": {
+                source: sorted(values) for source, values in sources.items()
+            },
+        }
+        for key, sources in grouped.items()
+        if len(sources) > 1
+        and len({value for values in sources.values() for value in values}) > 1
+    ]
+
+
 def _write_report(
     path: Path,
     batch: dict[str, Any],
@@ -2015,6 +2948,7 @@ def _write_report(
 ) -> None:
     summary = batch["summary"]
     coverage = batch.get("coverage_report", {})
+    semantic = batch.get("semantic_report", {})
     lines = [
         f"# 知识导入审核报告：{batch['batch_id']}",
         "",
@@ -2025,6 +2959,7 @@ def _write_report(
         f"- 未变化：{summary['unchanged']} 个",
         f"- 来源缺失：{summary['missing']} 个",
         f"- 提取失败：{summary['failed']} 个",
+        f"- 配置排除：{summary.get('excluded', 0)} 个",
         f"- 需转换旧格式：{len(batch.get('unsupported_files', []))} 个",
         "",
         "## 原文覆盖",
@@ -2040,6 +2975,21 @@ def _write_report(
         f"- 无文字块：{coverage.get('no_text_block_count', 0)} 个",
         f"- 失败块：{coverage.get('failed_block_count', 0)} 个",
         f"- 已阻断块：{coverage.get('blocked_block_count', 0)} 个",
+        f"- 舍弃块：{coverage.get('discarded_block_count', 0)} 个",
+        "",
+        "## 语义层覆盖",
+        "",
+        f"- 候选记录：{semantic.get('candidate_count', 0)} 条",
+        f"- 正式记录：{semantic.get('record_count', 0)} 条",
+        f"- 来源绑定完整率：{semantic.get('binding_rate', 1.0):.1%}",
+        f"- 正式可用：{semantic.get('approved_record_count', 0)} 条",
+        f"- 正式阻断：{semantic.get('blocked_record_count', 0)} 条",
+        f"- 活动有效/过期/待核对/冲突/舍弃："
+        f"{semantic.get('campaign_active_count', 0)}/"
+        f"{semantic.get('campaign_expired_count', 0)}/"
+        f"{semantic.get('campaign_pending_count', 0)}/"
+        f"{semantic.get('campaign_conflict_count', 0)}/"
+        f"{semantic.get('campaign_discarded_count', 0)}",
         "",
         "## 提取与 OCR 警告",
         "",
@@ -2067,6 +3017,31 @@ def _write_report(
             for item in quality_issues
         )
         if quality_issues
+        else ["- 无"]
+    )
+    lines.extend(("", "## 舍弃对象及原因", ""))
+    discarded_objects = batch.get("discarded_objects", [])
+    lines.extend(
+        (
+            f"- {item['source']}｜{item['locator']}｜{item['kind']}："
+            f"{item['discard_reason']}"
+            for item in discarded_objects
+        )
+        if discarded_objects
+        else ["- 无"]
+    )
+    lines.extend(("", "## 事实与活动冲突", ""))
+    semantic_conflicts = batch.get("semantic_conflicts", [])
+    lines.extend(
+        (
+            f"- {item['conflict_key']}："
+            + "；".join(
+                f"{source}={','.join(values)}"
+                for source, values in item["sources"].items()
+            )
+            for item in semantic_conflicts
+        )
+        if semantic_conflicts
         else ["- 无"]
     )
     lines.extend(
@@ -2103,6 +3078,12 @@ def _write_report(
     if batch.get("unsupported_files"):
         lines.extend(("", "## 需转换的旧格式", ""))
         lines.extend(f"- {value}" for value in batch["unsupported_files"])
+    if batch.get("excluded_sources"):
+        lines.extend(("", "## 配置排除来源", ""))
+        lines.extend(
+            f"- {item['relative_path']}：{item['reason']}"
+            for item in batch["excluded_sources"]
+        )
     lines.extend(("", "## 未入库资料明细", ""))
     for item in batch["missing_links"]:
         lines.append(
@@ -2145,6 +3126,10 @@ class KnowledgeImportService:
         with self._connect() as connection:
             return _coverage_report(connection)
 
+    def semantic_report(self) -> SemanticCoverageReport:
+        with self._connect() as connection:
+            return _semantic_coverage_report(connection)
+
     def _is_excluded(self, path: Path, source_dir: Path) -> bool:
         relative = path.relative_to(source_dir)
         return any(
@@ -2153,16 +3138,20 @@ class KnowledgeImportService:
         )
 
     def prepare(
-        self, source_dir: Path, *, resume_batch_id: str | None = None
+        self,
+        source_dir: Path,
+        *,
+        resume_batch_id: str | None = None,
+        review_all_sources: bool = False,
     ) -> PrepareReport:
         source_dir = source_dir.resolve()
         if not source_dir.is_dir():
             raise KnowledgeImportError(f"来源目录不存在：{source_dir}")
-        candidates = sorted(
-            path
-            for path in source_dir.rglob("*")
-            if path.is_file() and not self._is_excluded(path, source_dir)
-        )
+        discovered = sorted(path for path in source_dir.rglob("*") if path.is_file())
+        excluded_files = [
+            path for path in discovered if self._is_excluded(path, source_dir)
+        ]
+        candidates = [path for path in discovered if path not in excluded_files]
         files = [
             path
             for path in candidates
@@ -2172,6 +3161,14 @@ class KnowledgeImportService:
             path.relative_to(source_dir).as_posix()
             for path in candidates
             if path.suffix.casefold() in LEGACY_SOURCE_SUFFIXES
+        ]
+        excluded_sources = [
+            {
+                "relative_path": path.relative_to(source_dir).as_posix(),
+                "status": "discarded",
+                "reason": "配置排除：顾问聊天记录不得作为产品事实导入",
+            }
+            for path in excluded_files
         ]
         batch_id = resume_batch_id or (
             datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
@@ -2196,12 +3193,16 @@ class KnowledgeImportService:
                 raise KnowledgeImportError(
                     f"批次来源目录不一致：{progress.get('source_dir')}"
                 )
+            review_all_sources = bool(
+                progress.get("review_all_sources", review_all_sources)
+            )
         else:
             progress = {
                 "batch_id": batch_id,
                 "source_dir": source_root,
                 "created_at": _utc_now(),
                 "status": "preparing",
+                "review_all_sources": review_all_sources,
                 "files": {},
             }
         batch_sources: list[dict[str, Any]] = []
@@ -2350,14 +3351,19 @@ class KnowledgeImportService:
                     (source_id, digest),
                 ).fetchone()
                 revision_needed = revision_row is None
-                source_record["requires_review"] = (
-                    change in {"new", "changed", "failed"}
+                source_record["raw_review_required"] = (
+                    review_all_sources
+                    or change in {"new", "changed", "failed"}
                     or revision_needed
                     or (
                         revision_row is not None
                         and revision_row["status"] != "approved"
                     )
                 )
+                source_record["semantic_review_required"] = False
+                source_record["requires_review"] = source_record[
+                    "raw_review_required"
+                ]
                 source_record["revision_id"] = (
                     int(revision_row["id"]) if revision_row is not None else None
                 )
@@ -2477,6 +3483,36 @@ class KnowledgeImportService:
                 )
                 _write_json_atomic(progress_path, progress)
 
+            for source in batch_sources:
+                revision_id = source.get("revision_id")
+                if revision_id is None or source["change"] == "failed":
+                    continue
+                candidate_count = _ensure_semantic_scan(
+                    connection,
+                    batch_id=batch_id,
+                    source_name=str(source["relative_path"]),
+                    revision_id=int(revision_id),
+                )
+                formal_count = int(
+                    connection.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM semantic_records
+                        WHERE source_revision_id = ?
+                          AND record_status = 'approved'
+                        """,
+                        (int(revision_id),),
+                    ).fetchone()[0]
+                )
+                semantic_review_required = candidate_count > 0 and formal_count == 0
+                source["semantic_candidate_count"] = candidate_count
+                source["semantic_review_required"] = semantic_review_required
+                source["requires_review"] = bool(
+                    source.get("raw_review_required")
+                    or semantic_review_required
+                )
+            connection.commit()
+
             link_report = _current_link_report(connection)
             missing_links = _current_missing_links(connection)
             indexed_links = [
@@ -2561,13 +3597,31 @@ class KnowledgeImportService:
                             "preview": str(row["text"])[:240],
                             "audience": str(row["audience"]),
                             "quality_status": str(row["quality_status"]),
+                            "usage_status": str(row["usage_status"]),
+                            "discard_reason": str(row["discard_reason"] or ""),
+                            "suggested_usage_status": suggest_block_disposition(
+                                source_name=str(source["relative_path"]),
+                                locator=str(row["locator"]),
+                                text=str(row["text"]),
+                            )[0],
+                            "suggested_discard_reason": suggest_block_disposition(
+                                source_name=str(source["relative_path"]),
+                                locator=str(row["locator"]),
+                                text=str(row["text"]),
+                            )[1],
+                            "suggested_scope_status": suggest_block_disposition(
+                                source_name=str(source["relative_path"]),
+                                locator=str(row["locator"]),
+                                text=str(row["text"]),
+                            )[2],
                             "confidence": row["confidence"],
                             "warning": str(row["warning"] or ""),
                         }
                         for row in connection.execute(
                             """
                             SELECT block_key, locator, kind, text, audience,
-                                   quality_status, confidence, warning
+                                   quality_status, usage_status,
+                                   discard_reason, confidence, warning
                             FROM source_blocks WHERE revision_id = ?
                             ORDER BY block_index
                             """,
@@ -2598,15 +3652,36 @@ class KnowledgeImportService:
                             for term in internal_terms
                         )
                     ]
+                raw_review_required = bool(source.get("raw_review_required"))
+                existing_authority = "reference"
+                if revision_id is not None:
+                    authority_row = connection.execute(
+                        """
+                        SELECT authority FROM source_blocks
+                        WHERE revision_id = ? AND authority IN ('primary', 'reference')
+                        ORDER BY CASE authority WHEN 'primary' THEN 0 ELSE 1 END
+                        LIMIT 1
+                        """,
+                        (revision_id,),
+                    ).fetchone()
+                    if authority_row is not None:
+                        existing_authority = str(authority_row["authority"])
+                semantic_records = (
+                    _semantic_review_records(connection, int(revision_id))
+                    if revision_id is not None
+                    else []
+                )
                 decisions[source["relative_path"]] = {
                     "outputs": existing_outputs,
                     "excluded_reason": "",
                     "alias_candidates": aliases.get(source["relative_path"], []),
                     "aliases": existing_aliases,
                     "raw": {
-                        "status": "pending",
-                        "audience": "",
-                        "authority": "reference",
+                        "status": "pending" if raw_review_required else "approved",
+                        "audience": "" if raw_review_required else "advisor",
+                        "authority": existing_authority,
+                        "usage_status": "" if raw_review_required else "advisor",
+                        "preserve_existing": not raw_review_required,
                         "internal_locators": [],
                         "suggested_internal_locators": list(
                             dict.fromkeys(suggested_internal)
@@ -2614,6 +3689,13 @@ class KnowledgeImportService:
                         "locator_candidates": locator_candidates,
                         "block_candidates": block_candidates,
                         "block_overrides": {},
+                    },
+                    "semantic": {
+                        "extractor_version": SEMANTIC_EXTRACTOR_VERSION,
+                        "review_required": bool(
+                            source.get("semantic_review_required")
+                        ),
+                        "records": semantic_records,
                     },
                 }
                 for output in (
@@ -2638,14 +3720,21 @@ class KnowledgeImportService:
                     "unchanged": summary["unchanged"],
                     "missing": summary["missing"],
                     "failed": summary["failed"],
+                    "excluded": len(excluded_sources),
                 },
                 "sources": batch_sources,
                 "knowledge_base_hashes": base_hashes,
                 "missing_links": missing_links,
                 "link_report": asdict(link_report),
                 "unsupported_files": unsupported_files,
+                "excluded_sources": excluded_sources,
                 "coverage_report": asdict(_coverage_report(connection)),
+                "semantic_report": asdict(
+                    _semantic_coverage_report(connection)
+                ),
                 "quality_issues": _current_quality_issues(connection),
+                "discarded_objects": _current_discarded_objects(connection),
+                "semantic_conflicts": _current_semantic_conflicts(connection),
             }
             batch_path = batch_dir / "batch.json"
             review_path = batch_dir / "review.json"
@@ -2674,6 +3763,7 @@ class KnowledgeImportService:
             unchanged_count=summary["unchanged"],
             missing_source_count=summary["missing"],
             failed_count=summary["failed"],
+            excluded_count=len(excluded_sources),
             link_report=link_report,
             review_path=review_path,
             report_path=report_path,
@@ -2701,6 +3791,20 @@ class KnowledgeImportService:
             raise KnowledgeImportError(f"导入批次不存在：{batch_id}")
         batch = json.loads(batch_path.read_text(encoding="utf-8"))
         review = json.loads(review_path.read_text(encoding="utf-8"))
+        decisions = review.get("decisions", {})
+        if not isinstance(decisions, dict):
+            raise KnowledgeImportError("审核文件 decisions 必须是对象")
+        source_records = {
+            item["relative_path"]: item for item in batch["sources"]
+        }
+        unexpected = set(decisions).difference(source_records)
+        if unexpected:
+            raise KnowledgeImportError("审核文件包含不属于本批次的来源")
+        output_sources: dict[str, set[str]] = {}
+        validated_semantic: list[
+            tuple[int, sqlite3.Row, dict[str, Any], str, str]
+        ] = []
+        knowledge = KnowledgeBase(self.knowledge_dir, self.database_path)
         with self._connect() as connection:
             batch_row = connection.execute(
                 "SELECT status FROM import_batches WHERE batch_id = ?",
@@ -2710,63 +3814,140 @@ class KnowledgeImportService:
                 raise KnowledgeImportError(f"数据库中不存在批次：{batch_id}")
             if batch_row["status"] == "applied":
                 raise KnowledgeImportError(f"批次已经应用：{batch_id}")
-        decisions = review.get("decisions", {})
-        source_records = {
-            item["relative_path"]: item for item in batch["sources"]
-        }
-        output_sources: dict[str, set[str]] = {}
-        for relative_path, source in source_records.items():
-            if not source.get("requires_review", False):
-                continue
-            decision = decisions.get(relative_path)
-            if not isinstance(decision, dict):
-                raise KnowledgeImportError(f"来源尚未审核：{relative_path}")
-            outputs = decision.get("outputs", [])
-            excluded_reason = str(decision.get("excluded_reason", "")).strip()
-            raw = decision.get("raw", {})
-            if not isinstance(raw, dict):
-                raise KnowledgeImportError(
-                    f"原文审核配置无效：{relative_path}"
-                )
-            raw_status = str(raw.get("status", "")).strip()
-            if raw_status not in {"approved", "deferred"}:
-                raise KnowledgeImportError(
-                    f"来源尚未完成原文审核：{relative_path}"
-                )
-            if raw_status == "approved" and source.get("revision_id") is None:
-                raise KnowledgeImportError(
-                    f"来源缺少可应用的原文修订：{relative_path}"
-                )
-            if source["change"] == "failed" and not excluded_reason:
-                raise KnowledgeImportError(
-                    f"提取失败来源必须说明排除原因：{relative_path}"
-                )
-            if (
-                not outputs
-                and not excluded_reason
-                and raw_status not in {"approved", "deferred"}
-            ):
-                raise KnowledgeImportError(
-                    f"来源必须指定知识输出或排除原因：{relative_path}"
-                )
-            for output in outputs:
-                relative_output = Path(output)
-                if (
-                    relative_output.is_absolute()
-                    or not relative_output.parts
-                    or relative_output.parts[0] not in {"policy", "style_case"}
-                    or ".." in relative_output.parts
-                ):
-                    raise KnowledgeImportError(f"无效知识输出路径：{output}")
-                draft = batch_dir / "draft" / "knowledge" / relative_output
-                if not draft.is_file():
-                    raise KnowledgeImportError(f"知识草稿不存在：{draft}")
-                output_sources.setdefault(relative_output.as_posix(), set()).add(
-                    relative_path
-                )
+            KnowledgeBase._create_schema(connection)
 
-        backups: dict[Path, bytes | None] = {}
-        copied: list[Path] = []
+            connection.execute("SAVEPOINT validate_knowledge_import")
+            try:
+                for relative_path, source in source_records.items():
+                    if not source.get("requires_review", False):
+                        continue
+                    decision = decisions.get(relative_path)
+                    if not isinstance(decision, dict):
+                        raise KnowledgeImportError(
+                            f"来源尚未审核：{relative_path}"
+                        )
+                    outputs = decision.get("outputs", [])
+                    if not isinstance(outputs, list):
+                        raise KnowledgeImportError(
+                            f"知识输出必须是数组：{relative_path}"
+                        )
+                    excluded_reason = str(
+                        decision.get("excluded_reason", "")
+                    ).strip()
+                    raw = decision.get("raw", {})
+                    if not isinstance(raw, dict):
+                        raise KnowledgeImportError(
+                            f"原文审核配置无效：{relative_path}"
+                        )
+                    raw_status = str(raw.get("status", "")).strip()
+                    if raw_status not in {"approved", "deferred"}:
+                        raise KnowledgeImportError(
+                            f"来源尚未完成原文审核：{relative_path}"
+                        )
+                    revision_id_value = source.get("revision_id")
+                    if raw_status == "approved" and revision_id_value is None:
+                        raise KnowledgeImportError(
+                            f"来源缺少可应用的原文修订：{relative_path}"
+                        )
+                    if source["change"] == "failed" and not excluded_reason:
+                        raise KnowledgeImportError(
+                            f"提取失败来源必须说明排除原因：{relative_path}"
+                        )
+                    if raw_status == "deferred" and not excluded_reason:
+                        raise KnowledgeImportError(
+                            f"待核对来源必须说明原因：{relative_path}"
+                        )
+                    for output in outputs:
+                        relative_output = Path(str(output))
+                        if (
+                            relative_output.is_absolute()
+                            or not relative_output.parts
+                            or relative_output.parts[0]
+                            not in {"policy", "style_case"}
+                            or ".." in relative_output.parts
+                        ):
+                            raise KnowledgeImportError(
+                                f"无效知识输出路径：{output}"
+                            )
+                        draft = (
+                            batch_dir
+                            / "draft"
+                            / "knowledge"
+                            / relative_output
+                        )
+                        if not draft.is_file():
+                            raise KnowledgeImportError(
+                                f"知识草稿不存在：{draft}"
+                            )
+                        output_sources.setdefault(
+                            relative_output.as_posix(), set()
+                        ).add(relative_path)
+                    if revision_id_value is None:
+                        continue
+                    revision_id = int(revision_id_value)
+                    revision_row = connection.execute(
+                        """
+                        SELECT source_id, sha256 FROM source_revisions
+                        WHERE id = ?
+                        """,
+                        (revision_id,),
+                    ).fetchone()
+                    if (
+                        revision_row is None
+                        or int(revision_row["source_id"])
+                        != int(source["source_id"])
+                        or str(revision_row["sha256"]) != str(source["sha256"])
+                    ):
+                        raise KnowledgeImportError(
+                            f"来源修订绑定或哈希无效：{relative_path}"
+                        )
+                    semantic_items = _validate_semantic_review(
+                        connection, revision_id, decision
+                    )
+                    style_only = bool(outputs) and all(
+                        Path(str(output)).parts[0] == "style_case"
+                        for output in outputs
+                    )
+                    if style_only and any(
+                        item[2] in {"approved", "blocked"}
+                        for item in semantic_items
+                    ):
+                        raise KnowledgeImportError(
+                            f"style_case 不能批准或映射语义事实：{relative_path}"
+                        )
+                    if style_only and str(
+                        raw.get("usage_status") or raw.get("audience", "")
+                    ) == "advisor":
+                        raise KnowledgeImportError(
+                            f"style_case 原文不能作为顾问事实来源：{relative_path}"
+                        )
+                    if raw_status == "deferred" and any(
+                        item[2] in {"approved", "blocked"}
+                        for item in semantic_items
+                    ):
+                        raise KnowledgeImportError(
+                            f"原文待核对时语义候选不能批准：{relative_path}"
+                        )
+                    validated_semantic.extend(
+                        (
+                            int(source["source_id"]),
+                            row,
+                            payload,
+                            semantic_decision,
+                            reason,
+                        )
+                        for row, payload, semantic_decision, reason
+                        in semantic_items
+                    )
+                    if raw_status == "approved" and not bool(
+                        raw.get("preserve_existing", False)
+                    ):
+                        _apply_source_review(connection, revision_id, decision)
+                _validate_semantic_conflicts(connection, validated_semantic)
+            finally:
+                connection.execute("ROLLBACK TO validate_knowledge_import")
+                connection.execute("RELEASE validate_knowledge_import")
+
         for output in output_sources:
             target = self.knowledge_dir / output
             expected = batch["knowledge_base_hashes"].get(output)
@@ -2779,32 +3960,31 @@ class KnowledgeImportService:
                 raise KnowledgeImportError(
                     f"知识文件在批次准备后已变化，拒绝覆盖：{target}"
                 )
-            backups[target] = target.read_bytes() if target.is_file() else None
-            target.parent.mkdir(parents=True, exist_ok=True)
-            draft = batch_dir / "draft" / "knowledge" / output
-            temporary = target.with_suffix(target.suffix + f".{batch_id}.tmp")
-            shutil.copyfile(draft, temporary)
-            temporary.replace(target)
-            copied.append(target)
 
-        knowledge = KnowledgeBase(self.knowledge_dir, self.database_path)
+        backups: dict[Path, bytes | None] = {}
+        copied: list[Path] = []
+        rebuild = None
+        link_report = LinkReport(0, 0, 0, 0, 0, {})
+        semantic_record_count = 0
+        connection = self._connect()
         try:
-            rebuild = knowledge.rebuild()
-        except Exception as exc:
-            for target, backup in backups.items():
-                if backup is None:
-                    target.unlink(missing_ok=True)
-                else:
-                    target.write_bytes(backup)
-            try:
-                knowledge.rebuild()
-            except Exception:
-                pass
-            if isinstance(exc, KnowledgeError):
-                raise KnowledgeImportError(str(exc)) from exc
-            raise
+            KnowledgeBase._create_schema(connection)
+            connection.execute("BEGIN IMMEDIATE")
+            for output in output_sources:
+                target = self.knowledge_dir / output
+                backups[target] = (
+                    target.read_bytes() if target.is_file() else None
+                )
+                target.parent.mkdir(parents=True, exist_ok=True)
+                draft = batch_dir / "draft" / "knowledge" / output
+                temporary = target.with_suffix(
+                    target.suffix + f".{batch_id}.tmp"
+                )
+                shutil.copyfile(draft, temporary)
+                temporary.replace(target)
+                copied.append(target)
 
-        with self._connect() as connection:
+            rebuild = knowledge.rebuild(connection)
             for relative_path, decision in decisions.items():
                 source = source_records[relative_path]
                 source_id = int(source["source_id"])
@@ -2814,6 +3994,7 @@ class KnowledgeImportService:
                 ).strip()
                 raw = decision.get("raw", {})
                 raw_status = str(raw.get("status", "")).strip()
+                revision_id_value = source.get("revision_id")
                 if raw_status == "deferred":
                     connection.execute(
                         """
@@ -2827,11 +4008,24 @@ class KnowledgeImportService:
                             source_id,
                         ),
                     )
+                    if revision_id_value is not None:
+                        for row, _, semantic_decision, reason in (
+                            _validate_semantic_review(
+                                connection, int(revision_id_value), decision
+                            )
+                        ):
+                            connection.execute(
+                                """
+                                UPDATE semantic_candidates
+                                SET decision = ?, review_reason = ?
+                                WHERE id = ?
+                                """,
+                                (semantic_decision, reason, int(row["id"])),
+                            )
                     continue
-                revision_id = int(source["revision_id"])
-                _apply_source_review(
-                    connection, revision_id, decision
-                )
+                revision_id = int(revision_id_value)
+                if not bool(raw.get("preserve_existing", False)):
+                    _apply_source_review(connection, revision_id, decision)
                 connection.execute(
                     "DELETE FROM source_outputs WHERE source_id = ?",
                     (source_id,),
@@ -2862,8 +4056,7 @@ class KnowledgeImportService:
                         source_id,
                     ),
                 )
-                aliases = decision.get("aliases", [])
-                for alias in aliases:
+                for alias in decision.get("aliases", []):
                     canonical = str(alias.get("canonical_key", "")).strip()
                     source_url = str(alias.get("source_url", "")).strip()
                     if not canonical or not source_url:
@@ -2881,14 +4074,18 @@ class KnowledgeImportService:
                         """,
                         (source_id, canonical, source_url),
                     )
+                semantic_record_count += _apply_semantic_review(
+                    connection,
+                    revision_id,
+                    decision,
+                    (
+                        output for output in outputs
+                        if Path(output).parts[0] == "policy"
+                    ),
+                    datetime.now().date(),
+                )
             _rebuild_source_fts(connection)
             link_report = _current_link_report(connection)
-            batch["missing_links"] = _current_missing_links(connection)
-            batch["link_report"] = asdict(link_report)
-            batch["coverage_report"] = asdict(_coverage_report(connection))
-            batch["quality_issues"] = _current_quality_issues(connection)
-            _write_json_atomic(batch_path, batch)
-            _write_report(batch_dir / "report.md", batch, link_report)
             connection.execute(
                 """
                 UPDATE import_batches
@@ -2901,6 +4098,44 @@ class KnowledgeImportService:
                     batch_id,
                 ),
             )
+            connection.commit()
+        except Exception as exc:
+            connection.rollback()
+            for target, backup in backups.items():
+                if backup is None:
+                    target.unlink(missing_ok=True)
+                else:
+                    temporary = target.with_suffix(target.suffix + ".restore.tmp")
+                    temporary.write_bytes(backup)
+                    temporary.replace(target)
+            if isinstance(exc, KnowledgeError):
+                raise KnowledgeImportError(str(exc)) from exc
+            raise
+        finally:
+            connection.close()
+
+        if rebuild is None:
+            raise KnowledgeImportError("知识索引未完成重建")
+        with self._connect() as report_connection:
+            batch["missing_links"] = _current_missing_links(report_connection)
+            batch["link_report"] = asdict(link_report)
+            batch["coverage_report"] = asdict(
+                _coverage_report(report_connection)
+            )
+            batch["semantic_report"] = asdict(
+                _semantic_coverage_report(report_connection)
+            )
+            batch["quality_issues"] = _current_quality_issues(
+                report_connection
+            )
+            batch["discarded_objects"] = _current_discarded_objects(
+                report_connection
+            )
+            batch["semantic_conflicts"] = _current_semantic_conflicts(
+                report_connection
+            )
+        _write_json_atomic(batch_path, batch)
+        _write_report(batch_dir / "report.md", batch, link_report)
         staging_root = self.staging_dir.resolve()
         resolved_batch_dir = batch_dir.resolve()
         for temporary_name in ("extracted", "draft"):
@@ -2916,6 +4151,7 @@ class KnowledgeImportService:
             output_count=len(copied),
             indexed_document_count=rebuild.document_count,
             indexed_chunk_count=rebuild.chunk_count,
+            semantic_record_count=semantic_record_count,
             link_report=link_report,
         )
 
@@ -2948,7 +4184,40 @@ def format_coverage_report(report: CoverageReport) -> str:
         f"待审核块 {report.pending_block_count} 个、"
         f"无文字块 {report.no_text_block_count} 个、"
         f"失败块 {report.failed_block_count} 个；"
-        f"已阻断块 {report.blocked_block_count} 个；"
+        f"已阻断块 {report.blocked_block_count} 个、"
+        f"舍弃块 {report.discarded_block_count} 个；"
         f"图片 {report.image_count} 个，其中 OCR 有文字 "
         f"{report.image_ocr_count} 个；类型：{kinds}"
+    )
+
+
+def format_semantic_report(report: SemanticCoverageReport) -> str:
+    domains = "；".join(
+        (
+            f"{domain}：文件{values['files']}、块{values['blocks']}、"
+            f"候选{values['candidates']}、正式{values['records']}"
+        )
+        for domain, values in report.by_domain.items()
+    )
+    relations = "，".join(
+        f"{kind}={count}" for kind, count in report.by_relation.items()
+    ) or "无"
+    usage = "，".join(
+        f"{status}={count}" for status, count in report.by_usage_status.items()
+    ) or "无"
+    return (
+        f"语义候选 {report.candidate_count} 条，正式记录 "
+        f"{report.record_count} 条，来源绑定 {report.bound_record_count} 条 "
+        f"({report.binding_rate:.1%})；正式可用 "
+        f"{report.approved_record_count} 条、阻断 "
+        f"{report.blocked_record_count} 条，候选舍弃 "
+        f"{report.discarded_candidate_count} 条、待核对 "
+        f"{report.deferred_candidate_count} 条；活动共 "
+        f"{report.campaign_total_count} 条：有效 "
+        f"{report.campaign_active_count}、过期 "
+        f"{report.campaign_expired_count}、待核对 "
+        f"{report.campaign_pending_count}、冲突 "
+        f"{report.campaign_conflict_count}、舍弃 "
+        f"{report.campaign_discarded_count}；关系：{relations}；"
+        f"块处置：{usage}；领域：{domains}"
     )

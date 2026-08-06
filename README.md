@@ -98,9 +98,9 @@ ARK_API_KEY=替换为方舟模型推理APIKey
 .\.venv\python.exe -m lexiaodu --capture-smoke
 ```
 
-## 双层本地知识库
+## 双层本地知识库与轻量语义层
 
-知识库分为两层：`knowledge/` 保存便于顾问直接使用的整理知识，SQLite 保存可追溯的来源修订、完整提取内容、OCR、受众和审核状态。原始 Word、PDF、图片等二进制文件继续留在配置的外部来源目录，不复制进仓库或数据库。
+知识库继续保留两层正式内容：`knowledge/` 保存便于顾问直接使用的整理知识，SQLite 保存可追溯的来源修订、完整提取内容、OCR、受众和审核状态。在两层之间增加轻量语义记录，追溯链固定为“审核 source block → semantic → policy”；它只做天津适用性过滤、课程/活动关系和原文候选补充，不替代原文或整理知识。原始 Word、PDF、图片等二进制文件继续留在配置的外部来源目录，不复制进仓库或数据库。
 
 在配置的知识根目录下建立两个整理知识分类。支持继续在分类目录中建立更深层级，但可索引文档不能放在这两个分类之外：
 
@@ -126,7 +126,9 @@ knowledge/
 .\.venv\python.exe -m lexiaodu --search "初中数学 第1讲" --knowledge-type source
 ```
 
-`source` 默认只查询“已审核、顾问可用、质量合格”的原文。仅在本机审计时才可增加 `--include-internal`；内部、待审核、低可信 OCR、冲突阻断块和链接 URL 不会传给回复生成器。顾问生成流程会合并整理后的 `policy` 与审核原文，相关度接近时优先整理知识，精确原文命中用于补足遗漏。
+`source` 默认只查询“已审核、顾问可用、质量合格”的原文。仅在本机审计时才可增加 `--include-internal`；范围外、舍弃、待审核、低可信 OCR、冲突阻断块和链接 URL 不会传给回复生成器。顾问生成流程会合并整理后的 `policy` 与审核原文，相关度接近时优先整理知识，精确原文命中用于补足遗漏。问题明确写出年级、学科、班型、时期或教材时，正式语义记录先执行适用性过滤；召回阶段仍不增加语义分，整理知识 `+0.08` 与 primary `+0.03` 保持不变。
+
+`style_case` 始终独立检索，只影响表达方式，不能映射为语义事实，也不能参与课程、价格、活动或服务事实竞争。App 课程显示、实时名额、订单和付款状态会标记为“需要查询实际系统”；生成器不会用 RAG 推断这些实时状态。
 
 也可以先重建后立即检索：
 
@@ -152,20 +154,23 @@ PDF、PNG、JPG/JPEG 和 WebP：Office 文档会提取正文、表格、页眉�
 
 每个批次会在暂存目录生成 `review.json`、`report.md` 和 `draft/knowledge/` 草稿。
 完整提取结果在准备阶段写入待审核数据库修订；`review.json` 的
-`raw.block_candidates` 会逐项列出稳定块 ID、定位、类型、预览、受众、质量、OCR
-置信度和警告，便于将对象明确归为顾问可用、仅内部、待核对、无文字或提取失败。
+`raw.block_candidates` 会逐项列出稳定块 ID、定位、类型、预览、受众、质量、处置状态、天津适用建议、舍弃原因、OCR 置信度和警告，便于将对象明确归为顾问可用、内部留档、待核对、范围外/舍弃、无文字或提取失败。
 审核时为每个变化来源填写 `outputs` 或 `excluded_reason`，并设置 `raw.status`、
-`raw.audience`、`raw.authority`、`internal_locators` 和必要的 `block_overrides`；待核对
-数字或冲突块应将 `quality_status` 标为 `blocked`。只有标题与稳定链接目标完全匹配时，
+`raw.audience`、`raw.authority`、`raw.usage_status`、`internal_locators` 和必要的 `block_overrides`；舍弃块必须填写 `discard_reason`，待核对数字或冲突块应将 `quality_status` 标为 `blocked`。`semantic.records` 中每条候选都绑定 source revision/block，审核决定只能是 `approved`、`blocked`、`discarded` 或 `deferred`；任何遗留 `pending`、篡改绑定或孤立事实都会阻止 apply。只有标题与稳定链接目标完全匹配时，
 才把候选项加入 `aliases`。
 建议输出路径会从文件名提取年份和季节；信息不足时标记“时期待确认”，不能直接应用。
 若建议目标已有正式知识，准备阶段会复制一份到草稿区作为增量合并底稿，正式文件保持不变。
 整理草稿不能未经审核覆盖正式知识；但审核通过且顾问可用的原文会进入原文兜底索引，
-因此不会再因尚未整理成短知识块而丢失表格或图片信息。内部人员、业务指标、排期、
-联系方式和内部链接只保留在审计层。应用成功后会删除批次中的临时全文副本，只保留
+因此不会再因尚未整理成短知识块而丢失表格或图片信息。内部经营目标、人员、联系方式、排期、系统权限和无法核实的营销承诺会明确舍弃，不建设内部运营知识库。应用成功后会删除批次中的临时全文副本，只保留
 审核文件、报告、批次元数据和数据库修订。
 
-审核完成后应用批次并自动重建索引：
+只调整审核处置、天津适用性或语义标签时，可复用已存 source blocks 创建重审批次；它仍会核对来源 SHA-256，但不会重新提取 Office/PDF 或重复 OCR：
+
+```powershell
+.\.venv\python.exe -m lexiaodu --prepare-knowledge-import --review-all-knowledge-sources
+```
+
+审核完成后应用批次并自动重建索引。apply 会先校验全部审核决定、来源绑定、活动日期、冲突和知识文件基线哈希，再在同一 SQLite 事务中切换 policy、source、semantic、映射和 FTS；任一步失败都会恢复知识文件并回滚数据库：
 
 ```powershell
 .\.venv\python.exe -m lexiaodu --apply-knowledge-import <BATCH_ID>
@@ -182,6 +187,14 @@ PDF、PNG、JPG/JPEG 和 WebP：Office 文档会提取正文、表格、页眉�
 ```powershell
 .\.venv\python.exe -m lexiaodu --knowledge-coverage-report
 ```
+
+查看语义候选/正式记录、来源绑定率、八大领域、关系、块处置和活动状态：
+
+```powershell
+.\.venv\python.exe -m lexiaodu --knowledge-semantic-report
+```
+
+活动只有日期完整、来源审核通过且 apply 当日处于有效期内才会标记为 `active`；`expired`、`pending`、`conflict` 均不能进入顾问检索。检索时还会根据当前日期再次检查，避免应用后自然过期的活动继续出现。
 
 链接图按规范化 URL 去重，同时保留每次引用的来源和定位。报告区分已归档、顾问可用、
 仅内部和未入库目标；导入器不自动访问或下载内部链接，URL 也不会进入顾问检索正文。
@@ -202,9 +215,10 @@ OCR。修改后的新修订在审核应用前不会替换旧正式版本；移�
 .\.venv\python.exe -B -m pytest -q -p no:cacheprovider --basetemp artifacts\pytest-day5-final
 $env:PYTHONIOENCODING = 'utf-8'
 .\.venv\python.exe -B scripts\verify_day5_queries.py
+.\.venv\python.exe -B scripts\evaluate_advisor_knowledge.py
 ```
 
-第二条命令使用当前首批审核知识验证四个固定查询；小学数学、初中物理、课程时长制度和课程时长沟通案例的目标资料都必须进入 Top 3。完整演示步骤见 [演示脚本](docs/DEMO_SCRIPT.md)。
+第二条命令使用当前首批审核知识验证四个固定查询；第三条命令运行 15 类匿名化顾问知识评测，检查实时系统门槛、内部隔离和禁用表述，并列出每题正式知识命中。完整演示步骤见 [演示脚本](docs/DEMO_SCRIPT.md)。
 
 截图坐标使用 Qt 的逻辑像素，并且必须完整落在同一个屏幕内。跨屏区域会被明确拒绝，不会被静默裁剪或拼接。
 当前 OCR 过滤针对固定的左右气泡布局；若真实消息可能出现在画面中央或紧贴最外侧，需要调整策略或人工粘贴校正。

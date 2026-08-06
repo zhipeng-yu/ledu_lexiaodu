@@ -28,6 +28,8 @@ _SYSTEM_PROMPT = (
     "主动推进的动作也必须有事实依据：资料只说‘可先诊断’时，只能建议先诊断，"
     "不得补充‘免费’‘预约入口’或‘发送链接’；资料未说明办理方式时，"
     "只能说会继续确认，不得声称可以代报名、直接办理或发送资料。"
+    "当 requires_system_lookup 为 true 时，这是 App 课程显示、实时名额、订单或付款状态问题；"
+    "不得根据知识资料推断真实状态，只能自然提示顾问查询实际业务系统并核对必要信息。"
     "concern_summary 是给顾问看的简短顾虑摘要；wechat_reply 只放对家长说的话，不输出资料名称、章节或引用。"
     "仅返回 JSON 对象，字段固定为 concern_summary 和 wechat_reply。"
 )
@@ -42,6 +44,7 @@ class GenerationRequest:
     transcript: str
     policy_results: tuple[SearchResult, ...]
     style_results: tuple[SearchResult, ...]
+    requires_system_lookup: bool = False
 
     def __post_init__(self) -> None:
         if not self.transcript.strip():
@@ -79,7 +82,14 @@ class SimulatedGenerator:
 
     def generate(self, request: GenerationRequest) -> SuggestionDraft:
         question = _compact(request.transcript, 72)
-        if request.policy_results:
+        if request.requires_system_lookup:
+            summary = f"家长关注“{question}”，需要查询实际业务系统确认当前状态。"
+            reply = (
+                "家长，这个需要结合您当前的实际记录确认一下哈。\n"
+                "您把报名手机号和具体课程告诉我，我去系统里核对课程显示、"
+                "名额或订单状态后回复您。"
+            )
+        elif request.policy_results:
             primary = request.policy_results[0]
             fact = _compact(primary.evidence, 120).rstrip("。！？!?")
             source = f"《{primary.document_name}》{primary.locator}"
@@ -123,6 +133,7 @@ def build_openai_messages(request: GenerationRequest) -> list[dict[str, str]]:
             "transcript": request.transcript,
             "policy_results": policy_results,
             "style_results": style_results,
+            "requires_system_lookup": request.requires_system_lookup,
         },
         ensure_ascii=False,
     )

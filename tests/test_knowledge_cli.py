@@ -87,6 +87,25 @@ def test_coverage_cli_and_internal_flag_validation(
     assert "只能与 source 检索" in capsys.readouterr().err
 
 
+def test_semantic_report_cli(tmp_path: Path, capsys) -> None:
+    config = tmp_path / "app.toml"
+    _write_config(config, tmp_path / "knowledge", tmp_path / "knowledge.sqlite3")
+
+    exit_code = run(
+        ["--config", str(config), "--knowledge-semantic-report"]
+    )
+
+    assert exit_code == 0
+    output = capsys.readouterr().out
+    assert "语义候选 0 条" in output
+    assert "来源绑定 0 条 (100.0%)" in output
+
+
+def test_review_all_sources_requires_prepare(capsys) -> None:
+    assert run(["--review-all-knowledge-sources"]) == 2
+    assert "--review-all-knowledge-sources" in capsys.readouterr().err
+
+
 def test_console_safe_text_replaces_unencodable_ocr_symbols() -> None:
     class AsciiStream:
         encoding = "ascii"

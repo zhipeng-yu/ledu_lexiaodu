@@ -5,6 +5,10 @@ from uuid import uuid4
 
 from lexiaodu.generator import GenerationRequest, Generator
 from lexiaodu.knowledge import KnowledgeBase, KnowledgeType, SearchResult
+from lexiaodu.knowledge_semantics import (
+    requests_internal_information,
+    requires_live_system_lookup,
+)
 from lexiaodu.risk import DeterministicRiskRules, RiskAssessment
 
 
@@ -36,10 +40,16 @@ class AdviceService:
         search_advice = getattr(
             self._knowledge, "search_advice_policy", None
         )
-        policy_results = tuple(
-            search_advice(transcript)
-            if callable(search_advice)
-            else self._knowledge.search(transcript, KnowledgeType.POLICY)
+        system_lookup = requires_live_system_lookup(transcript)
+        internal_lookup = requests_internal_information(transcript)
+        policy_results = (
+            ()
+            if system_lookup or internal_lookup
+            else tuple(
+                search_advice(transcript)
+                if callable(search_advice)
+                else self._knowledge.search(transcript, KnowledgeType.POLICY)
+            )
         )
         style_results = tuple(
             self._knowledge.search(transcript, KnowledgeType.STYLE_CASE)
@@ -49,6 +59,7 @@ class AdviceService:
                 transcript=transcript,
                 policy_results=policy_results,
                 style_results=style_results,
+                requires_system_lookup=system_lookup,
             )
         )
         risk = self._risk_rules.assess(

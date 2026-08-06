@@ -31,6 +31,7 @@ from lexiaodu.knowledge_import import (
     KnowledgeImportService,
     format_coverage_report,
     format_link_report,
+    format_semantic_report,
 )
 from lexiaodu.ocr import PaddleOcrEngine
 from lexiaodu.risk import DeterministicRiskRules
@@ -78,6 +79,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="覆盖配置中的知识来源目录，仅与准备导入一起使用",
     )
     parser.add_argument(
+        "--review-all-knowledge-sources",
+        action="store_true",
+        help="准备批次时复用现有修订并重新审核全部来源，不重复提取或 OCR",
+    )
+    parser.add_argument(
         "--apply-knowledge-import",
         metavar="BATCH_ID",
         help="应用已审核的知识导入批次并重建索引",
@@ -96,6 +102,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--knowledge-coverage-report",
         action="store_true",
         help="统计原文修订、内容块、字符和图片 OCR 覆盖情况",
+    )
+    parser.add_argument(
+        "--knowledge-semantic-report",
+        action="store_true",
+        help="统计语义候选、正式记录、来源绑定、领域、关系和活动状态",
     )
     return parser
 
@@ -206,6 +217,12 @@ def run(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    if args.review_all_knowledge_sources and not args.prepare_knowledge_import:
+        print(
+            "--review-all-knowledge-sources 只能与 --prepare-knowledge-import 一起使用",
+            file=sys.stderr,
+        )
+        return 2
 
     import_actions = sum(
         bool(value)
@@ -215,6 +232,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             args.apply_knowledge_import,
             args.knowledge_link_report,
             args.knowledge_coverage_report,
+            args.knowledge_semantic_report,
         )
     )
     if import_actions > 1:
@@ -241,7 +259,10 @@ def run(argv: Sequence[str] | None = None) -> int:
                     args.knowledge_source_dir
                     or settings.knowledge_import.source_dir
                 )
-                report = service.prepare(source_dir)
+                report = service.prepare(
+                    source_dir,
+                    review_all_sources=args.review_all_knowledge_sources,
+                )
                 print(
                     f"知识导入批次已准备：{report.batch_id}\n"
                     f"审核文件：{report.review_path}\n"
@@ -271,6 +292,8 @@ def run(argv: Sequence[str] | None = None) -> int:
                 )
             elif args.knowledge_link_report:
                 print(format_link_report(service.link_report()))
+            elif args.knowledge_semantic_report:
+                print(format_semantic_report(service.semantic_report()))
             else:
                 print(format_coverage_report(service.coverage_report()))
         except KnowledgeImportError as exc:

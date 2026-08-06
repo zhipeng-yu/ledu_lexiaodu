@@ -1,0 +1,56 @@
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+
+from lexiaodu.knowledge_semantics import (
+    requests_internal_information,
+    requests_national_tianjin_compatibility,
+    requires_live_system_lookup,
+)
+
+
+EVAL_PATH = Path(__file__).parent / "fixtures" / "anonymized_advisor_eval.json"
+
+
+def test_anonymized_advisor_eval_covers_required_scenarios_without_identifiers() -> None:
+    cases = json.loads(EVAL_PATH.read_text(encoding="utf-8"))
+
+    assert len(cases) == 15
+    assert {case["id"] for case in cases} == {
+        "class_s_vs_aplus",
+        "summer_autumn_continuity",
+        "lesson_count",
+        "tianjin_textbook",
+        "grade_subject_content",
+        "online_replay_device",
+        "teachers_and_method",
+        "enrollment_payment_refund",
+        "active_campaign",
+        "expired_campaign",
+        "table_image_only",
+        "similar_content_different_goal",
+        "national_tianjin_scope",
+        "internal_information_block",
+        "live_app_order_status",
+    }
+    rendered = json.dumps(cases, ensure_ascii=False)
+    assert "http://" not in rendered and "https://" not in rendered
+    assert not re.search(r"(?<!\d)1[3-9]\d{9}(?!\d)", rendered)
+    for case in cases:
+        assert case["question"].strip()
+        assert case["expected_points"]
+        assert isinstance(case["must_ask"], list)
+        assert case["forbidden"]
+        assert requires_live_system_lookup(case["question"]) is bool(
+            case["requires_system_lookup"]
+        )
+    internal = next(
+        case for case in cases if case["id"] == "internal_information_block"
+    )
+    assert requests_internal_information(internal["question"])
+    national = next(
+        case for case in cases if case["id"] == "national_tianjin_scope"
+    )
+    assert requests_national_tianjin_compatibility(national["question"])

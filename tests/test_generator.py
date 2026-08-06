@@ -158,6 +158,56 @@ def test_advice_service_retrieves_both_types_before_generation() -> None:
     assert suggestion.risk.level is not RiskLevel.HIGH
 
 
+@pytest.mark.parametrize(
+    "question",
+    [
+        "报名后 App 为什么没有显示课程？",
+        "现在这个班还有名额吗？",
+        "我的订单付款状态成功了吗？",
+    ],
+)
+def test_live_business_status_never_uses_rag_facts(question: str) -> None:
+    policy = _result(KnowledgeType.POLICY, "旧记录.txt", "订单已经付款成功。")
+
+    class FakeKnowledge:
+        def search(
+            self, query: str, knowledge_type: KnowledgeType
+        ) -> list[SearchResult]:
+            return [policy]
+
+    suggestion = AdviceService(
+        FakeKnowledge(),  # type: ignore[arg-type]
+        SimulatedGenerator(),
+    ).create(question)
+
+    assert suggestion.facts == ()
+    assert "查询实际业务系统" in suggestion.concern_summary
+    assert "订单已经付款成功" not in suggestion.wechat_reply
+    assert "系统里核对" in suggestion.wechat_reply
+
+
+def test_internal_operations_query_never_uses_rag_facts() -> None:
+    policy = _result(
+        KnowledgeType.POLICY,
+        "内部资料.txt",
+        "内部续报目标和负责人排期。",
+    )
+
+    class FakeKnowledge:
+        def search(
+            self, query: str, knowledge_type: KnowledgeType
+        ) -> list[SearchResult]:
+            return [policy]
+
+    suggestion = AdviceService(
+        FakeKnowledge(),  # type: ignore[arg-type]
+        SimulatedGenerator(),
+    ).create("这个项目的内部续报目标、负责人和排期是什么？")
+
+    assert suggestion.facts == ()
+    assert "内部续报目标" not in suggestion.wechat_reply
+
+
 def test_openai_messages_separate_policy_facts_from_style_examples() -> None:
     policy = _result(KnowledgeType.POLICY, "课程规则.txt", "每周六上课。")
     style = _result(
@@ -181,7 +231,13 @@ def test_openai_messages_separate_policy_facts_from_style_examples() -> None:
     assert "主动推进的动作也必须有事实依据" in system_prompt
     assert "不得补充‘免费’‘预约入口’或‘发送链接’" in system_prompt
     payload = json.loads(messages[1]["content"])
-    assert set(payload) == {"transcript", "policy_results", "style_results"}
+    assert set(payload) == {
+        "transcript",
+        "policy_results",
+        "style_results",
+        "requires_system_lookup",
+    }
+    assert payload["requires_system_lookup"] is False
     assert payload["policy_results"] == [
         {
             "document": "课程规则.txt",

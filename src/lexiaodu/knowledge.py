@@ -6,11 +6,20 @@ import sqlite3
 import zipfile
 from collections import Counter
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from enum import StrEnum
 from importlib import import_module
 from pathlib import Path
 from xml.etree import ElementTree
+
+from lexiaodu.knowledge_semantics import (
+    query_semantic_filters,
+    requests_campaign_information,
+    requests_internal_information,
+    requests_national_tianjin_compatibility,
+    requires_live_system_lookup,
+    semantic_row_matches,
+)
 
 
 SUPPORTED_SUFFIXES = {".txt", ".docx", ".pdf"}
@@ -371,48 +380,66 @@ class KnowledgeBase:
             """
         )
 
-    def rebuild(self) -> RebuildReport:
+    def _replace_index(
+        self,
+        connection: sqlite3.Connection,
+        documents: list[_IndexedDocument],
+        indexed_at: str,
+    ) -> int:
+        chunk_count = 0
+        connection.execute("DELETE FROM chunks")
+        connection.execute("DELETE FROM documents")
+        for document in documents:
+            stat = document.path.stat()
+            cursor = connection.execute(
+                """
+                INSERT INTO documents (
+                    path, name, knowledge_type, file_format,
+                    size_bytes, modified_ns, indexed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    document.relative_path,
+                    document.path.name,
+                    document.knowledge_type,
+                    document.file_format,
+                    stat.st_size,
+                    stat.st_mtime_ns,
+                    indexed_at,
+                ),
+            )
+            document_id = cursor.lastrowid
+            connection.executemany(
+                """
+                INSERT INTO chunks (
+                    document_id, chunk_index, locator, text
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    (document_id, index, block.locator, block.text)
+                    for index, block in enumerate(document.blocks)
+                ),
+            )
+            chunk_count += len(document.blocks)
+        return chunk_count
+
+    def rebuild(
+        self, connection: sqlite3.Connection | None = None
+    ) -> RebuildReport:
         documents, ignored = self._collect_documents()
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         indexed_at = datetime.now(UTC).isoformat()
-        chunk_count = 0
-        with sqlite3.connect(self.database_path) as connection:
-            connection.execute("PRAGMA foreign_keys = ON")
-            self._create_schema(connection)
-            connection.execute("DELETE FROM chunks")
-            connection.execute("DELETE FROM documents")
-            for document in documents:
-                stat = document.path.stat()
-                cursor = connection.execute(
-                    """
-                    INSERT INTO documents (
-                        path, name, knowledge_type, file_format,
-                        size_bytes, modified_ns, indexed_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        document.relative_path,
-                        document.path.name,
-                        document.knowledge_type,
-                        document.file_format,
-                        stat.st_size,
-                        stat.st_mtime_ns,
-                        indexed_at,
-                    ),
+        if connection is None:
+            with sqlite3.connect(self.database_path) as owned_connection:
+                owned_connection.execute("PRAGMA foreign_keys = ON")
+                self._create_schema(owned_connection)
+                chunk_count = self._replace_index(
+                    owned_connection, documents, indexed_at
                 )
-                document_id = cursor.lastrowid
-                connection.executemany(
-                    """
-                    INSERT INTO chunks (
-                        document_id, chunk_index, locator, text
-                    ) VALUES (?, ?, ?, ?)
-                    """,
-                    (
-                        (document_id, index, block.locator, block.text)
-                        for index, block in enumerate(document.blocks)
-                    ),
-                )
-                chunk_count += len(document.blocks)
+        else:
+            chunk_count = self._replace_index(
+                connection, documents, indexed_at
+            )
         return RebuildReport(
             document_count=len(documents),
             chunk_count=chunk_count,
@@ -515,7 +542,7 @@ class KnowledgeBase:
                 rows = connection.execute(
                     f"""
                     SELECT chunk.id AS chunk_id, source.name,
-                           block.locator, chunk.text,
+                           block.id AS block_id, block.locator, chunk.text,
                            block.authority,
                            -bm25(source_chunks_fts, 0, 0, 0, 2, 2, 3) AS score
                     FROM source_chunks_fts AS fts
@@ -534,6 +561,54 @@ class KnowledgeBase:
                     """,
                     (fts_query, max(top_k * 100, 300)),
                 ).fetchall()
+                filters = query_semantic_filters(query)
+                if rows:
+                    block_ids = sorted({int(row["block_id"]) for row in rows})
+                    placeholders = ",".join("?" for _ in block_ids)
+                    semantic_rows = connection.execute(
+                        f"""
+                        SELECT source_block_id, record_kind, grade, subject,
+                               class_type, period, textbook_version,
+                               campaign_start, campaign_end, campaign_status
+                        FROM semantic_records
+                        WHERE source_block_id IN ({placeholders})
+                          AND record_status = 'approved'
+                          AND quality_status = 'approved'
+                          AND audience = 'advisor'
+                          AND scope_status IN ('tianjin', 'tianjin_compatible')
+                          AND (campaign_status = '' OR campaign_status = 'active')
+                        """,
+                        block_ids,
+                    ).fetchall()
+                    semantic_by_block: dict[int, list[sqlite3.Row]] = {}
+                    for semantic_row in semantic_rows:
+                        semantic_by_block.setdefault(
+                            int(semantic_row["source_block_id"]), []
+                        ).append(semantic_row)
+                    current_day = date.today().isoformat()
+
+                    def block_is_eligible(row: sqlite3.Row) -> bool:
+                        records = semantic_by_block.get(int(row["block_id"]), [])
+                        if not records:
+                            return True
+                        campaigns = [
+                            record
+                            for record in records
+                            if record["record_kind"] == "campaign"
+                        ]
+                        if campaigns and not any(
+                            record["campaign_status"] == "active"
+                            and str(record["campaign_start"]) <= current_day
+                            <= str(record["campaign_end"])
+                            for record in campaigns
+                        ):
+                            return False
+                        return not filters or any(
+                            semantic_row_matches(candidate, filters)
+                            for candidate in records
+                        )
+
+                    rows = [row for row in rows if block_is_eligible(row)]
         except sqlite3.OperationalError as exc:
             if "no such table" in str(exc).casefold():
                 return []
@@ -590,20 +665,204 @@ class KnowledgeBase:
             for row in ranked
         ]
 
+    def _search_semantic_source(
+        self, query: str, *, top_k: int
+    ) -> list[SearchResult]:
+        filters = query_semantic_filters(query)
+        campaign_only = requests_campaign_information(query)
+        compatible_only = requests_national_tianjin_compatibility(query)
+        query_terms = set(tokenize(query))
+        try:
+            with sqlite3.connect(self.database_path) as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    """
+                    SELECT record.id AS record_id, record.source_block_id,
+                           record.record_kind,
+                           record.scope_status,
+                           record.grade, record.subject, record.class_type,
+                           record.period, record.textbook_version,
+                           record.statement, source.name, block.locator,
+                           block.authority, chunk.id AS chunk_id, chunk.text
+                    FROM semantic_records AS record
+                    JOIN source_blocks AS block
+                      ON block.id = record.source_block_id
+                    JOIN source_revisions AS revision
+                      ON revision.id = record.source_revision_id
+                    JOIN source_files AS source ON source.id = revision.source_id
+                    JOIN source_chunks AS chunk ON chunk.block_id = block.id
+                    WHERE record.record_status = 'approved'
+                      AND record.quality_status = 'approved'
+                      AND record.audience = 'advisor'
+                      AND record.scope_status IN ('tianjin', 'tianjin_compatible')
+                      AND (record.campaign_status = ''
+                           OR (record.campaign_status = 'active'
+                               AND record.campaign_start <= date('now', 'localtime')
+                               AND record.campaign_end >= date('now', 'localtime')))
+                      AND revision.status = 'approved'
+                      AND block.quality_status = 'approved'
+                      AND block.usage_status = 'advisor'
+                    ORDER BY record.id, chunk.id
+                    """
+                ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc).casefold() or "no such column" in str(
+                exc
+            ).casefold():
+                return []
+            raise KnowledgeError(f"语义知识索引查询失败：{exc}") from exc
+
+        ranked: list[tuple[float, int, sqlite3.Row]] = []
+        for row in rows:
+            if campaign_only and row["record_kind"] != "campaign":
+                continue
+            if compatible_only and row["scope_status"] != "tianjin_compatible":
+                continue
+            if filters and not semantic_row_matches(row, filters):
+                continue
+            candidate_terms = set(
+                tokenize(
+                    " ".join(
+                        str(row[field] or "")
+                        for field in (
+                            "name",
+                            "locator",
+                            "grade",
+                            "subject",
+                            "class_type",
+                            "period",
+                            "textbook_version",
+                            "statement",
+                            "text",
+                        )
+                    )
+                )
+            )
+            overlap = len(query_terms.intersection(candidate_terms))
+            if not overlap and not filters:
+                continue
+            ranked.append((float(overlap), int(row["chunk_id"]), row))
+        ranked.sort(key=lambda value: (-value[0], value[1]))
+        selected: list[SearchResult] = []
+        seen_blocks: set[int] = set()
+        for score, _, row in ranked:
+            block_id = int(row["source_block_id"])
+            if block_id in seen_blocks:
+                continue
+            seen_blocks.add(block_id)
+            selected.append(
+                SearchResult(
+                    knowledge_type=KnowledgeType.SOURCE,
+                    document_name=str(row["name"]),
+                    locator=str(row["locator"]),
+                    evidence=_evidence(str(row["text"]), query),
+                    score=score,
+                    source_tier="approved_source",
+                    authority=str(row["authority"]),
+                )
+            )
+            if len(selected) == top_k:
+                break
+        return selected
+
+    def _filter_curated_by_semantics(
+        self,
+        results: list[SearchResult],
+        filters: dict[str, str],
+        *,
+        campaign_only: bool = False,
+        compatible_only: bool = False,
+    ) -> list[SearchResult]:
+        if not results:
+            return results
+        try:
+            with sqlite3.connect(self.database_path) as connection:
+                connection.row_factory = sqlite3.Row
+                rows = connection.execute(
+                    """
+                    SELECT document.name, record.record_kind,
+                           record.scope_status,
+                           record.grade, record.subject,
+                           record.class_type, record.period,
+                           record.textbook_version, record.campaign_start,
+                           record.campaign_end, record.campaign_status
+                    FROM policy_semantic_links AS link
+                    JOIN documents AS document
+                      ON document.path = link.knowledge_path
+                    JOIN semantic_records AS record
+                      ON record.id = link.semantic_record_id
+                    WHERE record.record_status = 'approved'
+                      AND record.quality_status = 'approved'
+                      AND record.scope_status IN ('tianjin', 'tianjin_compatible')
+                    """
+                ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc).casefold():
+                return results
+            raise KnowledgeError(f"语义知识映射查询失败：{exc}") from exc
+        by_document: dict[str, list[sqlite3.Row]] = {}
+        for row in rows:
+            by_document.setdefault(str(row["name"]), []).append(row)
+        current_day = date.today().isoformat()
+
+        def document_is_eligible(result: SearchResult) -> bool:
+            records = by_document.get(result.document_name, [])
+            if not records:
+                return not campaign_only and not compatible_only
+            if compatible_only and not any(
+                row["scope_status"] == "tianjin_compatible" for row in records
+            ):
+                return False
+            campaigns = [
+                row for row in records if row["record_kind"] == "campaign"
+            ]
+            if campaign_only and not campaigns:
+                return False
+            if campaigns and not any(
+                row["campaign_status"] == "active"
+                and str(row["campaign_start"]) <= current_day
+                <= str(row["campaign_end"])
+                for row in campaigns
+            ):
+                return False
+            return not filters or any(
+                semantic_row_matches(row, filters) for row in records
+            )
+
+        return [result for result in results if document_is_eligible(result)]
+
     def search_advice_policy(
         self, query: str, *, top_k: int = MAX_ADVICE_RESULTS
     ) -> list[SearchResult]:
         if not 1 <= top_k <= MAX_ADVICE_RESULTS:
             raise ValueError(f"top_k 必须在 1 到 {MAX_ADVICE_RESULTS} 之间")
+        if requests_internal_information(query) or requires_live_system_lookup(query):
+            return []
         curated = self.search(
             query,
             KnowledgeType.POLICY,
             top_k=min(MAX_SEARCH_RESULTS, top_k),
         )
-        source = self.search(
-            query,
-            KnowledgeType.SOURCE,
-            top_k=MAX_SEARCH_RESULTS,
+        filters = query_semantic_filters(query)
+        campaign_only = requests_campaign_information(query)
+        compatible_only = requests_national_tianjin_compatibility(query)
+        curated = self._filter_curated_by_semantics(
+            curated,
+            filters,
+            campaign_only=campaign_only,
+            compatible_only=compatible_only,
+        )
+        source = (
+            []
+            if campaign_only or compatible_only
+            else self.search(
+                query,
+                KnowledgeType.SOURCE,
+                top_k=MAX_SEARCH_RESULTS,
+            )
+        )
+        semantic_source = self._search_semantic_source(
+            query, top_k=MAX_SEARCH_RESULTS
         )
         query_terms = set(tokenize(query))
 
@@ -623,7 +882,7 @@ class KnowledgeBase:
             )
 
         ranked = sorted(
-            (*curated, *source),
+            (*curated, *source, *semantic_source),
             key=lambda result: (-relevance(result)[0], relevance(result)[1]),
         )
         seen: set[tuple[str, str]] = set()
