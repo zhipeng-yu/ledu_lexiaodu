@@ -2632,7 +2632,10 @@ def _apply_source_review(
         ).strip()
         if reviewed_scope not in SCOPE_STATUSES:
             raise KnowledgeImportError("原文块天津适用状态无效")
-        if suggested_usage == "discarded":
+        if suggested_usage == "discarded" and not (
+            suggested_reason == "范围外"
+            and reviewed_scope in {"tianjin", "tianjin_compatible"}
+        ):
             usage_status = "discarded"
             discard_reason = suggested_reason
         elif suggested_usage == "pending" and reviewed_scope not in {

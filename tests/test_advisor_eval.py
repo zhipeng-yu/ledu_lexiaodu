@@ -19,7 +19,7 @@ EVAL_PATH = Path(__file__).parent / "fixtures" / "anonymized_advisor_eval.json"
 def test_anonymized_advisor_eval_covers_required_scenarios_without_identifiers() -> None:
     cases = json.loads(EVAL_PATH.read_text(encoding="utf-8"))
 
-    assert len(cases) == 25
+    assert len(cases) == 27
     assert {case["id"] for case in cases} == {
         "class_s_vs_aplus",
         "summer_autumn_continuity",
@@ -46,6 +46,8 @@ def test_anonymized_advisor_eval_covers_required_scenarios_without_identifiers()
         "class_choice_specific",
         "refund_specific",
         "other_region_induction",
+        "reviewed_humanities_teacher",
+        "teacher_year_version_conflict",
     }
     rendered = json.dumps(cases, ensure_ascii=False)
     assert "http://" not in rendered and "https://" not in rendered

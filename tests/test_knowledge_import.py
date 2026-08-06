@@ -686,6 +686,47 @@ def test_review_marked_conflict_is_blocked_from_source_search(
     assert "课程共十二讲" in report
 
 
+def test_review_can_override_scope_only_without_bypassing_internal_gate(
+    tmp_path: Path,
+) -> None:
+    source_dir = tmp_path / "sources"
+    source_dir.mkdir()
+    _write_docx(
+        source_dir / "教师介绍.docx",
+        ["毕业于上海师范大学", "上海校区内部排课负责人安排"],
+    )
+    knowledge_dir = tmp_path / "knowledge"
+    _knowledge_dirs(knowledge_dir)
+    database = tmp_path / "knowledge.sqlite3"
+    service = KnowledgeImportService(
+        knowledge_dir, database, tmp_path / "staging"
+    )
+    prepared = service.prepare(source_dir)
+    review = json.loads(prepared.review_path.read_text(encoding="utf-8"))
+    decision = review["decisions"]["教师介绍.docx"]
+    _approve_raw(decision)
+    for block in decision["raw"]["block_candidates"]:
+        decision["raw"]["block_overrides"][block["block_key"]] = {
+            "audience": "advisor",
+            "quality_status": "approved",
+            "usage_status": "advisor",
+            "discard_reason": "",
+            "scope_status": "tianjin",
+        }
+        for record in decision["semantic"]["records"]:
+            if record["record"]["block_key"] == block["block_key"]:
+                record["record"]["scope_status"] = "tianjin"
+    prepared.review_path.write_text(
+        json.dumps(review, ensure_ascii=False), encoding="utf-8"
+    )
+
+    service.apply(prepared.batch_id)
+
+    knowledge = KnowledgeBase(knowledge_dir, database)
+    assert knowledge.search("上海师范大学", KnowledgeType.SOURCE)
+    assert knowledge.search("内部排课负责人安排", KnowledgeType.SOURCE) == []
+
+
 def test_source_version_switch_is_atomic_and_missing_file_keeps_last_approval(
     tmp_path: Path,
 ) -> None:

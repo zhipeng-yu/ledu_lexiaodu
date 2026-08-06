@@ -273,7 +273,12 @@ def _infer_scope(source_name: str, value: str) -> tuple[str, str]:
     combined = f"{source_name} {value}"
     if "政策" in source_name and any(term in combined for term in ("天津", "小升初", "招生")):
         return "out_of_scope", "天津升学政策不在本次知识领域"
-    if any(term in combined for term in ("上海", "广州")) and "天津适用" not in combined:
+    is_reviewed_teacher_profile = "审核教师介绍" in source_name
+    if (
+        any(term in combined for term in ("上海", "广州"))
+        and "天津适用" not in combined
+        and not is_reviewed_teacher_profile
+    ):
         return "out_of_scope", "其他地区独有内容"
     if any(term in combined for term in ("全国班", "全国版", "全国小高")):
         return "pending", "全国资料是否服务天津需核对"
@@ -281,16 +286,10 @@ def _infer_scope(source_name: str, value: str) -> tuple[str, str]:
 
 
 def _infer_usage(value: str, scope_status: str) -> tuple[str, str]:
-    if scope_status == "out_of_scope":
-        return "discarded", "范围外"
-    if scope_status == "pending":
-        return "pending", "适用天津范围待核对"
     if any(term in value for term in _INTERNAL_TERMS):
         return "discarded", "内部经营、人员、排期或系统管理信息"
     if any(term in value for term in _MARKETING_RISK_TERMS):
         return "discarded", "无法核实的结果性营销主张"
-    if any(term in value for term in _NON_FACTUAL_ACTIVITY_TERMS):
-        return "pending", "活动优惠、赠品或续报营销内容需完整审核"
     if any(term in value for term in _INTERNAL_SCRIPT_TERMS):
         return "discarded", "内部触达、宣发或顾问执行内容"
     if (
@@ -299,6 +298,12 @@ def _infer_usage(value: str, scope_status: str) -> tuple[str, str]:
         or _STAFF_PROFILE_PATTERN.search(value)
     ):
         return "discarded", "真实联系方式、学员、订单或员工标识符"
+    if scope_status == "out_of_scope":
+        return "discarded", "范围外"
+    if scope_status == "pending":
+        return "pending", "适用天津范围待核对"
+    if any(term in value for term in _NON_FACTUAL_ACTIVITY_TERMS):
+        return "pending", "活动优惠、赠品或续报营销内容需完整审核"
     return "advisor", ""
 
 

@@ -57,6 +57,20 @@ def test_other_region_name_alone_does_not_block_teacher_lookup() -> None:
     assert not requests_out_of_scope_region("上海交通大学毕业的老师有什么经历")
 
 
+def test_reviewed_teacher_education_is_not_treated_as_regional_course() -> None:
+    usage, reason, scope = suggest_block_disposition(
+        source_name=(
+            "policy/师资、教学过程与学习服务/审核教师介绍.txt"
+        ),
+        locator="公开教师｜初中道法",
+        text="公开教师为上海师范大学哲学专业背景。",
+    )
+
+    assert usage == "advisor"
+    assert reason == ""
+    assert scope == "tianjin"
+
+
 def test_class_comparison_uses_reviewed_policy_only() -> None:
     assert requests_class_selection("S班和A+班有什么区别，孩子适合哪个")
     assert not requests_class_selection("孩子现在在S班")
