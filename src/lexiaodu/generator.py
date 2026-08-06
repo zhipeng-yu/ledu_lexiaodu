@@ -100,6 +100,15 @@ class SimulatedGenerator:
                 "如果您还有具体时间或班型要求，也可以一起告诉我，"
                 "我再帮您对着看一下。"
             )
+        elif request.style_results:
+            primary = request.style_results[0]
+            example = _compact(primary.evidence, 240)
+            if "建议回复：" in example:
+                example = example.split("建议回复：", 1)[1].strip()
+            summary = (
+                f"家长关注“{question}”，可参考已脱敏沟通案例温和回应。"
+            )
+            reply = example
         else:
             summary = f"家长关注“{question}”，但本地暂未检索到可核实的制度依据。"
             reply = (

@@ -3,11 +3,14 @@ from __future__ import annotations
 import pytest
 
 from lexiaodu.knowledge_semantics import (
+    requests_communication_guidance,
     requests_enrollment_rules,
     requests_class_selection,
     requests_online_course_service,
     requests_out_of_scope_region,
+    requests_internal_information,
     requests_product_overview,
+    requests_style_only_guidance,
     requests_teacher_information,
     suggest_block_disposition,
 )
@@ -31,6 +34,18 @@ def test_internal_business_targets_are_discarded(text: str) -> None:
     assert usage == "discarded"
     assert scope == "tianjin"
     assert "内部经营" in reason
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "内部备课考核和排课要求是什么",
+        "教师考核、师训和触达要求是什么",
+        "这个项目的教学执行安排是什么",
+    ],
+)
+def test_internal_teaching_execution_queries_are_blocked(query: str) -> None:
+    assert requests_internal_information(query)
 
 
 @pytest.mark.parametrize("query", ["上海课程能给天津孩子用吗", "广州独有教材怎么样"])
@@ -70,3 +85,9 @@ def test_product_overview_queries_use_curated_policy() -> None:
     assert requests_product_overview("课程产品总览")
     assert not requests_product_overview("三年级数学课程内容是什么")
     assert not requests_product_overview("启蒙数学课程产品课时")
+
+
+def test_renewal_communication_can_use_style_without_factual_rag() -> None:
+    assert requests_communication_guidance("续报期家长一直不回复，怎么温和沟通")
+    assert requests_style_only_guidance("续报期家长一直不回复，怎么温和沟通")
+    assert not requests_style_only_guidance("家长问当前续报优惠，应该怎么回复")

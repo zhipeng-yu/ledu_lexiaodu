@@ -7,6 +7,8 @@ from lexiaodu.generator import GenerationRequest, Generator
 from lexiaodu.knowledge import KnowledgeBase, KnowledgeType, SearchResult
 from lexiaodu.knowledge_semantics import (
     requests_internal_information,
+    requests_private_information,
+    requests_style_only_guidance,
     requires_live_system_lookup,
 )
 from lexiaodu.risk import DeterministicRiskRules, RiskAssessment
@@ -42,17 +44,23 @@ class AdviceService:
         )
         system_lookup = requires_live_system_lookup(transcript)
         internal_lookup = requests_internal_information(transcript)
+        private_lookup = requests_private_information(transcript)
+        style_only = requests_style_only_guidance(transcript)
         policy_results = (
             ()
-            if system_lookup or internal_lookup
+            if system_lookup or internal_lookup or private_lookup or style_only
             else tuple(
                 search_advice(transcript)
                 if callable(search_advice)
                 else self._knowledge.search(transcript, KnowledgeType.POLICY)
             )
         )
-        style_results = tuple(
-            self._knowledge.search(transcript, KnowledgeType.STYLE_CASE)
+        style_results = (
+            ()
+            if internal_lookup or private_lookup
+            else tuple(
+                self._knowledge.search(transcript, KnowledgeType.STYLE_CASE)
+            )
         )
         draft = self._generator.generate(
             GenerationRequest(

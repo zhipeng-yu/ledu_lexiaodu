@@ -158,6 +158,34 @@ def test_advice_service_retrieves_both_types_before_generation() -> None:
     assert suggestion.risk.level is not RiskLevel.HIGH
 
 
+def test_renewal_communication_uses_style_without_irrelevant_policy() -> None:
+    policy = _result(
+        KnowledgeType.POLICY,
+        "无关课程服务.txt",
+        "课程提供回放。",
+    )
+    style = _result(
+        KnowledgeType.STYLE_CASE,
+        "课程重复与续报.txt",
+        "建议回复：家长，我先不频繁打扰您，您方便时再告诉我最需要确认的问题。",
+    )
+
+    class FakeKnowledge:
+        def search(
+            self, query: str, knowledge_type: KnowledgeType
+        ) -> list[SearchResult]:
+            return [policy] if knowledge_type is KnowledgeType.POLICY else [style]
+
+    suggestion = AdviceService(
+        FakeKnowledge(),  # type: ignore[arg-type]
+        SimulatedGenerator(),
+    ).create("续报期家长一直不回复，怎么温和沟通")
+
+    assert suggestion.facts == ()
+    assert "不频繁打扰" in suggestion.wechat_reply
+    assert "课程提供回放" not in suggestion.wechat_reply
+
+
 @pytest.mark.parametrize(
     "question",
     [
@@ -206,6 +234,28 @@ def test_internal_operations_query_never_uses_rag_facts() -> None:
 
     assert suggestion.facts == ()
     assert "内部续报目标" not in suggestion.wechat_reply
+
+
+def test_internal_teaching_execution_query_never_uses_rag_facts() -> None:
+    policy = _result(
+        KnowledgeType.POLICY,
+        "课程资料.txt",
+        "公开课程内容。",
+    )
+
+    class FakeKnowledge:
+        def search(
+            self, query: str, knowledge_type: KnowledgeType
+        ) -> list[SearchResult]:
+            return [policy]
+
+    suggestion = AdviceService(
+        FakeKnowledge(),  # type: ignore[arg-type]
+        SimulatedGenerator(),
+    ).create("内部备课、教师考核、排课和触达要求是什么？")
+
+    assert suggestion.facts == ()
+    assert "公开课程内容" not in suggestion.wechat_reply
 
 
 def test_openai_messages_separate_policy_facts_from_style_examples() -> None:

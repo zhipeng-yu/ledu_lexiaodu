@@ -537,6 +537,55 @@ def requests_campaign_information(query: str) -> bool:
     return any(term in query for term in _CAMPAIGN_TERMS)
 
 
+def requests_communication_guidance(query: str) -> bool:
+    return any(
+        term in query
+        for term in (
+            "怎么沟通",
+            "如何沟通",
+            "怎么回复",
+            "如何回复",
+            "怎么说",
+            "话术",
+            "不回复",
+            "不希望被催",
+            "不想被催",
+            "催促",
+            "犹豫",
+            "顾虑",
+        )
+    )
+
+
+def requests_style_only_guidance(query: str) -> bool:
+    if not requests_communication_guidance(query):
+        return False
+    factual_terms = (
+        "优惠",
+        "赠品",
+        "截止",
+        "日期",
+        "多少钱",
+        "价格",
+        "费用",
+        "条件",
+        "办理方式",
+        "办理入口",
+        "报名规则",
+        "退费",
+        "退款",
+        "转班",
+        "课程内容",
+        "教材",
+        "讲次",
+        "班型",
+        "老师介绍",
+        "教师介绍",
+        "能不能报名",
+    )
+    return not any(term in query for term in factual_terms)
+
+
 def requests_internal_information(query: str) -> bool:
     compact = " ".join(query.split())
     restricted_terms = (
@@ -551,11 +600,36 @@ def requests_internal_information(query: str) -> bool:
         "内部排期",
         "项目进度",
         "权限路径",
+        "内部备课",
+        "内部考核",
+        "内部排课",
+        "内部触达",
+        "教师考核",
+        "备课要求",
+        "排课安排",
+        "触达要求",
+        "教学执行",
     )
     if any(term in compact for term in restricted_terms):
         return True
     return "内部" in compact and any(
-        term in compact for term in ("目标", "负责人", "员工", "排期", "进度", "权限")
+        term in compact
+        for term in (
+            "目标",
+            "负责人",
+            "员工",
+            "排期",
+            "进度",
+            "权限",
+            "备课",
+            "磨课",
+            "师训",
+            "考核",
+            "排课",
+            "绩效",
+            "触达",
+            "执行",
+        )
     )
 
 
