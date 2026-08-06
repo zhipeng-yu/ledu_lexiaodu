@@ -238,6 +238,66 @@ def test_policy_upgrade_prepare_is_read_only_and_apply_switches_atomically(
     assert service.policy_report().retired_document_count == 1
 
 
+def test_source_rereview_preserves_section_policy_bindings(tmp_path: Path) -> None:
+    service, _, database, ids = _seed_formal_knowledge(tmp_path)
+    prepared = service.prepare_policy_upgrade()
+    _approve_policy_drafts(
+        prepared.review_path,
+        {
+            "policy/学科年级课程/小学数学.txt": [
+                (
+                    "一年级数学｜数感与图形",
+                    "适用天津。小学一年级数学课程包含数感启蒙和图形认知。",
+                    ids["一年级"],
+                ),
+                (
+                    "二年级数学｜运算与问题解决",
+                    "天津小学二年级数学课程包含运算方法和问题解决。",
+                    ids["二年级"],
+                ),
+            ]
+        },
+    )
+    service.apply(prepared.batch_id)
+
+    rereview = service.prepare(tmp_path / "sources", review_all_sources=True)
+    review = json.loads(rereview.review_path.read_text(encoding="utf-8"))
+    decision = review["decisions"]["天津小学数学课程资料.docx"]
+    decision["raw"].update(
+        {
+            "status": "approved",
+            "audience": "advisor",
+            "authority": "primary",
+            "usage_status": "advisor",
+            "preserve_existing": False,
+        }
+    )
+    rereview.review_path.write_text(
+        json.dumps(review, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    service.apply(rereview.batch_id)
+
+    report = service.policy_report()
+    assert report.section_count == report.linked_section_count == 2
+    assert report.semantic_link_count == report.valid_semantic_link_count == 2
+    assert report.binding_rate == 1.0
+    assert report.source_bound_section_count == 2
+    assert report.source_binding_rate == 1.0
+    with sqlite3.connect(database) as connection:
+        locators = {
+            row[0]
+            for row in connection.execute(
+                "SELECT policy_locator FROM policy_semantic_links "
+                "WHERE policy_locator <> ''"
+            )
+        }
+    assert locators == {
+        "一年级数学｜数感与图形",
+        "二年级数学｜运算与问题解决",
+    }
+
+
 def test_policy_upgrade_rejects_orphan_semantic_evidence(tmp_path: Path) -> None:
     service, _, _, ids = _seed_formal_knowledge(tmp_path)
     prepared = service.prepare_policy_upgrade()

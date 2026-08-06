@@ -22,6 +22,7 @@ from lexiaodu.knowledge_semantics import (
     requests_national_tianjin_compatibility,
     requests_online_course_service,
     requests_out_of_scope_region,
+    requests_private_information,
     requests_product_overview,
     requests_teacher_information,
     requires_live_system_lookup,
@@ -891,6 +892,7 @@ class KnowledgeBase:
             raise ValueError(f"top_k 必须在 1 到 {MAX_ADVICE_RESULTS} 之间")
         if (
             requests_internal_information(query)
+            or requests_private_information(query)
             or requests_out_of_scope_region(query)
             or requires_live_system_lookup(query)
         ):

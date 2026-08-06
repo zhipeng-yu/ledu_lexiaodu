@@ -2340,19 +2340,73 @@ def _apply_semantic_review(
             "SELECT source_id FROM source_revisions WHERE id = ?", (revision_id,)
         ).fetchone()[0]
     )
-    old_record_ids = [
-        int(row[0])
-        for row in connection.execute(
+    old_record_rows = connection.execute(
+        """
+        SELECT record.id, record.candidate_id, record.payload_json
+        FROM semantic_records AS record
+        JOIN source_revisions AS revision
+          ON revision.id = record.source_revision_id
+        WHERE revision.source_id = ? AND record.record_status = 'approved'
+        """,
+        (source_id,),
+    ).fetchall()
+    old_record_ids = [int(row["id"]) for row in old_record_rows]
+    old_payloads = {
+        int(row["candidate_id"]): json.loads(str(row["payload_json"]))
+        for row in old_record_rows
+    }
+    section_policy_mode = (
+        connection.execute(
             """
+            SELECT 1 FROM policy_semantic_links
+            WHERE policy_locator <> '' AND policy_text_hash <> ''
+            LIMIT 1
+            """
+        ).fetchone()
+        is not None
+    )
+    inherited_policy_links: dict[int, set[tuple[str, str, str]]] = {}
+    for row in connection.execute(
+        """
+        SELECT record.candidate_id, link.knowledge_path,
+               link.policy_locator, link.policy_text_hash
+        FROM policy_semantic_links AS link
+        JOIN semantic_records AS record
+          ON record.id = link.semantic_record_id
+        JOIN source_revisions AS revision
+          ON revision.id = record.source_revision_id
+        WHERE revision.source_id = ? AND record.record_status = 'approved'
+        """,
+        (source_id,),
+    ):
+        policy_locator = str(row["policy_locator"])
+        policy_text_hash = str(row["policy_text_hash"])
+        if section_policy_mode and (
+            not policy_locator or not policy_text_hash
+        ):
+            continue
+        inherited_policy_links.setdefault(
+            int(row["candidate_id"]), set()
+        ).add(
+            (
+                str(row["knowledge_path"]),
+                policy_locator,
+                policy_text_hash,
+            )
+        )
+    connection.execute(
+        """
+        DELETE FROM policy_semantic_links
+        WHERE semantic_record_id IN (
             SELECT record.id
             FROM semantic_records AS record
             JOIN source_revisions AS revision
               ON revision.id = record.source_revision_id
-            WHERE revision.source_id = ? AND record.record_status = 'approved'
-            """,
-            (source_id,),
+            WHERE revision.source_id = ?
         )
-    ]
+        """,
+        (source_id,),
+    )
     if old_record_ids:
         connection.execute(
             """
@@ -2459,14 +2513,33 @@ def _apply_semantic_review(
         )
         semantic_record_id = int(cursor.lastrowid)
         if quality == "approved":
+            policy_links = (
+                set()
+                if section_policy_mode
+                else {(str(output), "", "") for output in outputs}
+            )
+            candidate_id = int(row["id"])
+            if old_payloads.get(candidate_id) == payload:
+                policy_links.update(
+                    inherited_policy_links.get(candidate_id, set())
+                )
             connection.executemany(
                 """
-                INSERT INTO policy_semantic_links (
+                INSERT OR IGNORE INTO policy_semantic_links (
                     knowledge_path, policy_locator, policy_text_hash,
                     semantic_record_id
-                ) VALUES (?, '', '', ?)
+                ) VALUES (?, ?, ?, ?)
                 """,
-                ((str(output), semantic_record_id) for output in outputs),
+                (
+                    (
+                        knowledge_path,
+                        policy_locator,
+                        policy_text_hash,
+                        semantic_record_id,
+                    )
+                    for knowledge_path, policy_locator, policy_text_hash
+                    in policy_links
+                ),
             )
         applied_count += 1
     return applied_count

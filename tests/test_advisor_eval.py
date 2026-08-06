@@ -8,6 +8,7 @@ from lexiaodu.knowledge_semantics import (
     requests_internal_information,
     requests_national_tianjin_compatibility,
     requests_out_of_scope_region,
+    requests_private_information,
     requires_live_system_lookup,
 )
 
@@ -18,7 +19,7 @@ EVAL_PATH = Path(__file__).parent / "fixtures" / "anonymized_advisor_eval.json"
 def test_anonymized_advisor_eval_covers_required_scenarios_without_identifiers() -> None:
     cases = json.loads(EVAL_PATH.read_text(encoding="utf-8"))
 
-    assert len(cases) == 21
+    assert len(cases) == 23
     assert {case["id"] for case in cases} == {
         "class_s_vs_aplus",
         "summer_autumn_continuity",
@@ -34,6 +35,8 @@ def test_anonymized_advisor_eval_covers_required_scenarios_without_identifiers()
         "similar_content_different_goal",
         "national_tianjin_scope",
         "internal_information_block",
+        "private_teacher_contact_block",
+        "private_student_case_block",
         "live_app_order_status",
         "tianjin_textbook_specific",
         "reviewed_teacher_specific",
@@ -57,6 +60,17 @@ def test_anonymized_advisor_eval_covers_required_scenarios_without_identifiers()
         case for case in cases if case["id"] == "internal_information_block"
     )
     assert requests_internal_information(internal["question"])
+    private_cases = [
+        case for case in cases if case.get("requires_no_facts", False)
+    ]
+    assert {case["id"] for case in private_cases} == {
+        "private_teacher_contact_block",
+        "private_student_case_block",
+    }
+    assert all(
+        requests_private_information(case["question"])
+        for case in private_cases
+    )
     national = next(
         case for case in cases if case["id"] == "national_tianjin_scope"
     )

@@ -63,10 +63,15 @@ def main() -> int:
             case["id"] != "internal_information_block"
             or not suggestion.facts
         )
-        if leaked or not system_ok or not internal_ok:
+        no_facts_ok = (
+            not bool(case.get("requires_no_facts", False))
+            or not suggestion.facts
+        )
+        if leaked or not system_ok or not internal_ok or not no_facts_ok:
             print(
                 f"[FAIL] {case['id']}：禁用表述={leaked or '无'}，"
-                f"系统门槛={system_ok}，内部隔离={internal_ok}"
+                f"系统门槛={system_ok}，内部隔离={internal_ok}，"
+                f"隐私隔离={no_facts_ok}"
             )
             safety_failed = True
             continue
@@ -74,7 +79,11 @@ def main() -> int:
             covered += 1
             names = [result.document_name for result in suggestion.facts]
             print(f"[PASS] {case['id']}：检索 {len(names)} 条，{names}")
-        elif requires_system or case["id"] == "internal_information_block":
+        elif (
+            requires_system
+            or case["id"] == "internal_information_block"
+            or bool(case.get("requires_no_facts", False))
+        ):
             print(f"[PASS] {case['id']}：按门槛不使用知识事实")
         else:
             print(f"[REVIEW] {case['id']}：暂无顾问可用事实")

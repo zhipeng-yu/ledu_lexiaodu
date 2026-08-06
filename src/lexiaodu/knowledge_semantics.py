@@ -518,6 +518,31 @@ def requests_internal_information(query: str) -> bool:
     )
 
 
+def requests_private_information(query: str) -> bool:
+    compact = " ".join(query.split())
+    if any(
+        term in compact
+        for term in (
+            "员工编号",
+            "学员号",
+            "手机号",
+            "联系电话",
+            "联系方式",
+            "微信号",
+        )
+    ):
+        return True
+    asks_student_case = any(
+        term in compact for term in ("学员", "学生", "孩子")
+    ) and any(
+        term in compact for term in ("姓名", "成绩", "班级", "个人信息", "案例")
+    )
+    identifies_individual = any(
+        term in compact for term in ("真实", "内部", "某位", "具体", "这位", "那个")
+    )
+    return asks_student_case and identifies_individual
+
+
 def requests_national_tianjin_compatibility(query: str) -> bool:
     return "全国" in query and "天津" in query
 

@@ -914,6 +914,12 @@ def test_national_course_query_requires_tianjin_compatible_evidence(
         "这个项目的内部续报目标、负责人和排期是什么"
     ) == []
     assert knowledge.search_advice_policy(
+        "某位老师的手机号和微信是什么"
+    ) == []
+    assert knowledge.search_advice_policy(
+        "内部真实学员的姓名、成绩和班级案例是什么"
+    ) == []
+    assert knowledge.search_advice_policy(
         "报名后 App 为什么没有课程，订单付款成功了吗"
     ) == []
 

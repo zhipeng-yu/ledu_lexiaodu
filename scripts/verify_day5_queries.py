@@ -17,19 +17,19 @@ class QueryCheck:
 
 CHECKS = (
     QueryCheck(
-        "小学数学课程体系怎么安排",
+        "天津小学三年级数学课程内容怎么安排",
         KnowledgeType.POLICY,
-        "小学数学-2026夏秋.txt",
+        "小学数学.txt",
     ),
     QueryCheck(
         "初中物理班型定位适合什么学生",
         KnowledgeType.POLICY,
-        "初中物理-2026夏秋.txt",
+        "初中物理.txt",
     ),
     QueryCheck(
-        "线上课一节课多长时间孩子坐不住",
+        "线上直播课回放和设备有什么要求",
         KnowledgeType.POLICY,
-        "课程共性问答-2026夏秋.txt",
+        "通用师资与学习服务.txt",
     ),
     QueryCheck(
         "家长担心线上课时间太长如何温和回复",
