@@ -2,8 +2,9 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QGuiApplication, QInputMethodEvent
+from PySide6.QtGui import QFont, QGuiApplication, QInputMethodEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
@@ -18,6 +19,7 @@ from PySide6.QtWidgets import (
 from lexiaodu.advice import AdviceSuggestion
 from lexiaodu.chat import AiChatDialog, ChatMessage, ChatRole
 from lexiaodu.feedback import FeedbackReason, FeedbackSubmission
+from lexiaodu.font_scaling import ApplicationFontScaler
 from lexiaodu.knowledge import KnowledgeType, SearchResult
 from lexiaodu.risk import RiskAssessment, RiskLevel, TransferStatus
 
@@ -47,6 +49,56 @@ def _suggestion(level: RiskLevel) -> AdviceSuggestion:
             ),
         ),
     )
+
+
+def test_chat_explicit_font_roles_follow_global_scaling() -> None:
+    application = QApplication.instance() or QApplication([])
+    original_font = QFont(application.font())
+    original_delta = application.property(
+        "_lexiaodu_font_delta_points"
+    )
+    base_font = QFont(original_font)
+    base_font.setPointSizeF(10.0)
+    application.setFont(base_font)
+    scaler = ApplicationFontScaler(application)
+    dialog = AiChatDialog()
+
+    try:
+        dialog.show()
+        assert dialog.append_ai_response("字号同步测试")
+        application.processEvents()
+        title = dialog.findChild(QLabel, "chatTitle")
+        history = dialog.findChild(QListWidget, "chatHistory")
+        chat_input = dialog.findChild(QPlainTextEdit, "chatInput")
+        assert title is not None
+        assert history is not None
+        assert chat_input is not None
+        turn = history.itemWidget(history.item(0))
+        assert turn is not None
+        body = turn.findChild(QLabel, "turnBody")
+        assert body is not None
+        assert title.font().pointSizeF() == pytest.approx(15.0)
+        assert body.font().pointSizeF() == pytest.approx(12.0)
+
+        QTest.keyClick(
+            chat_input,
+            Qt.Key.Key_Plus,
+            Qt.KeyboardModifier.ControlModifier,
+        )
+        application.processEvents()
+
+        assert title.font().pointSizeF() == pytest.approx(16.0)
+        assert body.font().pointSizeF() == pytest.approx(13.0)
+    finally:
+        dialog.close()
+        application.removeEventFilter(scaler)
+        scaler.deleteLater()
+        application.setProperty(
+            "_lexiaodu_font_delta_points",
+            original_delta,
+        )
+        application.setFont(original_font)
+        application.processEvents()
 
 
 def test_send_parent_question_without_fabricating_ai_response() -> None:

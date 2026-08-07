@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from PySide6.QtCore import QPoint, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, Qt, Signal
 from PySide6.QtGui import QAction, QMouseEvent
 from PySide6.QtWidgets import QApplication, QLabel, QSizePolicy, QToolBar
+
+from lexiaodu.font_scaling import scaled_point_size
 
 
 class FloatingToolbar(QToolBar):
@@ -46,8 +48,7 @@ class FloatingToolbar(QToolBar):
         self._status.setObjectName("status")
         self.addWidget(self._status)
 
-        self.setStyleSheet(
-            """
+        self._style_template = """
             QToolBar#floatingToolbar {
                 background: #20252d;
                 border: 1px solid #3a4350;
@@ -67,7 +68,24 @@ class FloatingToolbar(QToolBar):
             }
             QToolButton:hover { background: #477af0; }
             """
+        self._apply_style_sheet()
+
+    def _apply_style_sheet(self) -> None:
+        title_size = scaled_point_size(11.0)
+        self.setStyleSheet(
+            self._style_template.replace(
+                "font-size: 15px;",
+                f"font-size: {title_size:g}pt;",
+            )
         )
+
+    def event(self, event: QEvent) -> bool:
+        if (
+            event.type() == QEvent.Type.ApplicationFontChange
+            and hasattr(self, "_style_template")
+        ):
+            self._apply_style_sheet()
+        return super().event(event)
 
     def set_status(self, text: str) -> None:
         self._status.setText(text)

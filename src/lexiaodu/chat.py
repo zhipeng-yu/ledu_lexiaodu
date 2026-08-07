@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
-from PySide6.QtCore import Qt, QTimer, Signal, Slot
+from PySide6.QtCore import QEvent, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QGuiApplication, QInputMethodEvent, QKeyEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -30,6 +30,7 @@ from lexiaodu.feedback import (
     UNHELPFUL_REASONS,
     USEFUL_REASONS,
 )
+from lexiaodu.font_scaling import scaled_point_size
 
 
 class ChatRole(StrEnum):
@@ -416,8 +417,7 @@ class AiChatDialog(QDialog):
         composer_layout.addLayout(actions)
         layout.addWidget(self._composer)
 
-        self.setStyleSheet(
-            """
+        self._style_template = """
             QDialog#aiChatDialog {
                 background: #ffffff;
                 color: #202123;
@@ -570,7 +570,32 @@ class AiChatDialog(QDialog):
                 background: #477af0;
             }
             """
-        )
+        self._apply_style_sheet()
+
+    def _apply_style_sheet(self) -> None:
+        style_sheet = self._style_template
+        replacements = {
+            "font-size: 18px;": (
+                f"font-size: {scaled_point_size(14.0):g}pt;"
+            ),
+            "font-size: 14px;": (
+                f"font-size: {scaled_point_size(11.0):g}pt;"
+            ),
+            "font-size: 12px;": (
+                f"font-size: {scaled_point_size(9.0):g}pt;"
+            ),
+        }
+        for existing, scaled in replacements.items():
+            style_sheet = style_sheet.replace(existing, scaled)
+        self.setStyleSheet(style_sheet)
+
+    def event(self, event: QEvent) -> bool:
+        if (
+            event.type() == QEvent.Type.ApplicationFontChange
+            and hasattr(self, "_style_template")
+        ):
+            self._apply_style_sheet()
+        return super().event(event)
 
     @property
     def messages(self) -> tuple[ChatMessage, ...]:
