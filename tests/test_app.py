@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 
-import pytest
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from lexiaodu.app import _build_generator_from_environment
+import pytest
+from PySide6.QtGui import QFont
+from PySide6.QtWidgets import QApplication
+
+from lexiaodu.app import (
+    _build_generator_from_environment,
+    _configure_application,
+)
+from lexiaodu.font_scaling import ApplicationFontScaler
 from lexiaodu.generator import OpenAICompatibleGenerator, SimulatedGenerator
 
 
@@ -16,6 +25,39 @@ def _clear_generator_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         "ARK_MODEL",
     ):
         monkeypatch.delenv(name, raising=False)
+
+
+def test_configure_application_installs_default_font_increase() -> None:
+    application = QApplication.instance() or QApplication([])
+    original_font = QFont(application.font())
+    original_name = application.applicationName()
+    original_quit_policy = application.quitOnLastWindowClosed()
+    original_delta = application.property(
+        "_lexiaodu_font_delta_points"
+    )
+    base_font = QFont(original_font)
+    base_font.setPointSizeF(10.0)
+    application.setFont(base_font)
+
+    scaler = _configure_application(application, "乐小读")
+
+    try:
+        assert isinstance(scaler, ApplicationFontScaler)
+        assert application.applicationName() == "乐小读"
+        assert not application.quitOnLastWindowClosed()
+        assert scaler.current_point_size == pytest.approx(11.0)
+    finally:
+        if isinstance(scaler, ApplicationFontScaler):
+            application.removeEventFilter(scaler)
+            scaler.deleteLater()
+        application.setProperty(
+            "_lexiaodu_font_delta_points",
+            original_delta,
+        )
+        application.setFont(original_font)
+        application.setApplicationName(original_name)
+        application.setQuitOnLastWindowClosed(original_quit_policy)
+        application.processEvents()
 
 
 def test_build_generator_defaults_to_local_simulation(monkeypatch) -> None:

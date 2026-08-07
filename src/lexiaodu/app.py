@@ -15,6 +15,7 @@ from lexiaodu.capture import CaptureError, CaptureResult, QtScreenCapture, scree
 from lexiaodu.config import AppSettings, SettingsError, load_settings
 from lexiaodu.domain import centered_region
 from lexiaodu.feedback import FeedbackStore
+from lexiaodu.font_scaling import ApplicationFontScaler
 from lexiaodu.generator import (
     Generator,
     OpenAICompatibleGenerator,
@@ -143,9 +144,13 @@ def _position_toolbar(toolbar: FloatingToolbar, settings: AppSettings) -> None:
     toolbar.move(x, available.y() + settings.toolbar.top_margin)
 
 
-def _configure_application(application: QApplication, app_name: str) -> None:
+def _configure_application(
+    application: QApplication,
+    app_name: str,
+) -> ApplicationFontScaler:
     application.setApplicationName(app_name)
     application.setQuitOnLastWindowClosed(False)
+    return ApplicationFontScaler(application)
 
 
 def _console_safe_text(value: str, stream: object | None = None) -> str:
@@ -366,7 +371,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         return 0
 
     application = QApplication([sys.argv[0]])
-    _configure_application(application, settings.app_name)
+    font_scaler = _configure_application(application, settings.app_name)
 
     if args.capture_smoke:
         try:
@@ -414,6 +419,7 @@ def run(argv: Sequence[str] | None = None) -> int:
     toolbar.show()
     exit_code = application.exec()
     del controller
+    del font_scaler
     return exit_code
 
 

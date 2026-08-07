@@ -6,7 +6,6 @@ from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
-from lexiaodu.app import _configure_application
 from lexiaodu.domain import ScreenRegion
 from lexiaodu.selection import SelectionOverlay, region_from_points
 
@@ -44,7 +43,7 @@ def test_delayed_selection_survives_while_all_windows_are_hidden() -> None:
     overlay.region_selected.connect(selected.append)
 
     try:
-        _configure_application(application, "乐小读")
+        application.setQuitOnLastWindowClosed(False)
         overlay.start()
         QTest.mousePress(
             overlay,
