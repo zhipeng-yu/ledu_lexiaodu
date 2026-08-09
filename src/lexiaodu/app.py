@@ -251,6 +251,7 @@ def build_chat_runtime(
         repository,
         cipher,
     )
+    attachments.replay_pending_cleanup_jobs()
     context_builder = ContextBuilder(
         repository,
         recent_limit=settings.chat.recent_message_limit,
@@ -286,6 +287,7 @@ def build_chat_runtime(
         raise
     application = QApplication.instance()
     if application is not None:
+        application.setQuitOnLastWindowClosed(True)
         application.aboutToQuit.connect(controller.shutdown)
     window.show()
     return ChatRuntime(
@@ -326,6 +328,7 @@ def build_legacy_runtime(
     )
     application = QApplication.instance()
     if application is not None:
+        application.setQuitOnLastWindowClosed(False)
         application.aboutToQuit.connect(controller.shutdown)
     _position_toolbar(toolbar, settings)
     toolbar.show()

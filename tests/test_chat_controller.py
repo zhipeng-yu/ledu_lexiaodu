@@ -925,3 +925,43 @@ def test_delete_intent_tombstones_conversation_and_removes_attachment(
     assert not attachment.encrypted_path.exists()
     assert window.active_conversation_id is None
     controller.shutdown()
+
+
+def test_delete_intent_refreshes_ui_when_attachment_cleanup_must_retry(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    application()
+    repository = repository_at(tmp_path / "chat.sqlite3")
+    conversation = repository.create_conversation("cleanup retry")
+    controller, window, repository, attachments = _workspace_controller(tmp_path)
+    image = QImage(2, 2, QImage.Format.Format_RGB32)
+    image.fill(QColor("white"))
+    attachment = attachments.save_image(conversation.id, image)
+    window.select(conversation.id)
+    monkeypatch.setattr(
+        "lexiaodu.chat_controller.QMessageBox.question",
+        lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
+    )
+    real_unlink = Path.unlink
+
+    def fail_attachment_unlink(path: Path, *args, **kwargs) -> None:
+        if path.resolve() == attachment.encrypted_path.resolve():
+            raise PermissionError("attachment is temporarily locked")
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_attachment_unlink)
+
+    try:
+        controller.delete_conversation(conversation.id)
+    except PermissionError:
+        pass
+
+    assert repository.list_conversations() == ()
+    assert window.conversations == ()
+    assert window.active_conversation_id is None
+    assert attachment.encrypted_path.exists()
+    assert len(
+        repository.list_cleanup_jobs(conversation.id, "delete_attachment")
+    ) == 1
+    controller.shutdown()

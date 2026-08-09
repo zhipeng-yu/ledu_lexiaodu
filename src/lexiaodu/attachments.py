@@ -113,6 +113,18 @@ class AttachmentStore:
             completed += 1
         return completed
 
+    def replay_pending_cleanup_jobs(self) -> int:
+        completed = 0
+        conversation_ids = self._repository.list_pending_cleanup_conversation_ids(
+            "delete_attachment"
+        )
+        for conversation_id in conversation_ids:
+            try:
+                completed += self.run_cleanup_jobs(conversation_id)
+            except (OSError, AttachmentCorrupt):
+                continue
+        return completed
+
     @staticmethod
     def _png_bytes(image: QImage) -> bytes:
         buffer = QBuffer()

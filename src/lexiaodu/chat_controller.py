@@ -8,7 +8,7 @@ from uuid import uuid4
 from PySide6.QtCore import QObject, Signal, Slot
 from PySide6.QtWidgets import QInputDialog, QMessageBox
 
-from lexiaodu.attachments import AttachmentStore
+from lexiaodu.attachments import AttachmentCorrupt, AttachmentStore
 from lexiaodu.capture import ScreenCapture
 from lexiaodu.chat_window import (
     ChatConversationView,
@@ -134,7 +134,10 @@ class ChatController(QObject):
         if answer != QMessageBox.StandardButton.Yes:
             return
         self._repository.delete_conversation(conversation_id)
-        self._attachments.run_cleanup_jobs(conversation_id)
+        try:
+            self._attachments.run_cleanup_jobs(conversation_id)
+        except (OSError, AttachmentCorrupt):
+            pass
         self._refresh_conversations()
 
     @Slot(str)

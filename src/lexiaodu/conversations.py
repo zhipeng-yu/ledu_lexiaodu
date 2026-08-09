@@ -895,6 +895,18 @@ class ConversationRepository:
             for row in rows
         )
 
+    def list_pending_cleanup_conversation_ids(self, kind: str) -> tuple[str, ...]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT DISTINCT conversation_id FROM cleanup_jobs
+                WHERE kind = ? AND status = 'pending'
+                ORDER BY conversation_id
+                """,
+                (kind,),
+            ).fetchall()
+        return tuple(row["conversation_id"] for row in rows)
+
     def complete_cleanup_job(self, conversation_id: str, job_id: str) -> None:
         now = self._now()
         with self._connect() as connection:
