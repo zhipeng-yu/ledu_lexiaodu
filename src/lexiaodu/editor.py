@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -17,6 +18,12 @@ from PySide6.QtWidgets import (
 )
 
 from lexiaodu.ocr import Speaker, TranscriptLine
+
+
+@dataclass(frozen=True, slots=True)
+class CorrectedTranscript:
+    lines: tuple[TranscriptLine, ...]
+    text: str
 
 
 class TranscriptEditor(QDialog):
@@ -162,3 +169,10 @@ class TranscriptEditor(QDialog):
             speaker = speaker_editor.currentData()
             lines.append(TranscriptLine(speaker=speaker, text=text))
         return lines
+
+    def corrected_transcript(self) -> CorrectedTranscript:
+        lines = tuple(self.transcript())
+        return CorrectedTranscript(
+            lines=lines,
+            text="\n".join(line.text for line in lines),
+        )

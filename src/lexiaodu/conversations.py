@@ -90,6 +90,25 @@ class PendingRequest:
         return self.processing_status
 
 
+@dataclass(frozen=True, slots=True)
+class Attachment:
+    id: str
+    conversation_id: str
+    encrypted_path: Path
+    encrypted_data_key: bytes
+    corrected_text: str | None
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class CleanupJob:
+    id: str
+    conversation_id: str
+    kind: str
+    payload: str
+    created_at: datetime
+
+
 class ConversationRepository:
     def __init__(
         self,
@@ -161,6 +180,23 @@ class ConversationRepository:
                 );
                 CREATE INDEX IF NOT EXISTS summaries_by_conversation
                     ON context_summaries(conversation_id, created_at, id);
+                CREATE TABLE IF NOT EXISTS attachments (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL REFERENCES conversations(id),
+                    encrypted_path BLOB NOT NULL,
+                    encrypted_data_key BLOB NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS attachments_by_conversation
+                    ON attachments(conversation_id, created_at, id);
+                CREATE TABLE IF NOT EXISTS corrected_ocr_texts (
+                    attachment_id TEXT PRIMARY KEY REFERENCES attachments(id),
+                    conversation_id TEXT NOT NULL REFERENCES conversations(id),
+                    encrypted_text BLOB NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS corrected_ocr_by_conversation
+                    ON corrected_ocr_texts(conversation_id, created_at, attachment_id);
                 CREATE TABLE IF NOT EXISTS cleanup_jobs (
                     id TEXT PRIMARY KEY,
                     conversation_id TEXT NOT NULL REFERENCES conversations(id),
@@ -505,6 +541,133 @@ class ConversationRepository:
             ).fetchall()
         return tuple(self._context_summary_from_row(row) for row in rows)
 
+    def save_attachment(
+        self,
+        conversation_id: str,
+        attachment_id: str,
+        encrypted_path: str | Path,
+        encrypted_data_key: bytes,
+    ) -> Attachment:
+        now = self._now()
+        with self._connect() as connection:
+            self._begin_write(connection)
+            self._active_conversation_row(connection, conversation_id)
+            connection.execute(
+                """
+                INSERT INTO attachments(
+                    id, conversation_id, encrypted_path,
+                    encrypted_data_key, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    attachment_id,
+                    conversation_id,
+                    self._encrypt_text(str(encrypted_path)),
+                    encrypted_data_key,
+                    self._format_time(now),
+                ),
+            )
+        return Attachment(
+            attachment_id,
+            conversation_id,
+            Path(encrypted_path),
+            encrypted_data_key,
+            None,
+            now,
+        )
+
+    def get_attachment(
+        self, conversation_id: str, attachment_id: str
+    ) -> Attachment:
+        with self._connect() as connection:
+            self._active_conversation_row(connection, conversation_id)
+            row = self._attachment_row(connection, conversation_id, attachment_id)
+        return self._attachment_from_row(row)
+
+    def list_attachments(
+        self, conversation_id: str
+    ) -> tuple[Attachment, ...]:
+        with self._connect() as connection:
+            self._active_conversation_row(connection, conversation_id)
+            rows = connection.execute(
+                """
+                SELECT attachments.*, corrected_ocr_texts.encrypted_text
+                FROM attachments
+                LEFT JOIN corrected_ocr_texts
+                    ON corrected_ocr_texts.attachment_id = attachments.id
+                    AND corrected_ocr_texts.conversation_id = attachments.conversation_id
+                WHERE attachments.conversation_id = ?
+                ORDER BY attachments.created_at, attachments.id
+                """,
+                (conversation_id,),
+            ).fetchall()
+        return tuple(self._attachment_from_row(row) for row in rows)
+
+    def save_corrected_text(
+        self,
+        conversation_id: str,
+        attachment_id: str,
+        corrected_text: str,
+    ) -> Attachment:
+        now = self._now()
+        with self._connect() as connection:
+            self._begin_write(connection)
+            self._active_conversation_row(connection, conversation_id)
+            self._attachment_row(connection, conversation_id, attachment_id)
+            connection.execute(
+                """
+                INSERT INTO corrected_ocr_texts(
+                    attachment_id, conversation_id, encrypted_text, created_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(attachment_id) DO UPDATE SET
+                    encrypted_text = excluded.encrypted_text,
+                    created_at = excluded.created_at
+                WHERE corrected_ocr_texts.conversation_id = excluded.conversation_id
+                """,
+                (
+                    attachment_id,
+                    conversation_id,
+                    self._encrypt_text(corrected_text),
+                    self._format_time(now),
+                ),
+            )
+            row = self._attachment_row(connection, conversation_id, attachment_id)
+        return self._attachment_from_row(row)
+
+    def list_cleanup_jobs(self, kind: str) -> tuple[CleanupJob, ...]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM cleanup_jobs
+                WHERE kind = ? AND status = 'pending'
+                ORDER BY created_at, id
+                """,
+                (kind,),
+            ).fetchall()
+        return tuple(
+            CleanupJob(
+                id=row["id"],
+                conversation_id=row["conversation_id"],
+                kind=row["kind"],
+                payload=self._decrypt_text(row["encrypted_payload"]),
+                created_at=self._parse_time(row["created_at"]),
+            )
+            for row in rows
+        )
+
+    def complete_cleanup_job(self, job_id: str) -> None:
+        now = self._now()
+        with self._connect() as connection:
+            self._begin_write(connection)
+            connection.execute(
+                """
+                UPDATE cleanup_jobs
+                SET status = 'completed', completed_at = ?
+                WHERE id = ? AND status = 'pending'
+                """,
+                (self._format_time(now), job_id),
+            )
+
     def delete_conversation(self, conversation_id: str) -> None:
         now = self._now()
         with self._connect() as connection:
@@ -654,6 +817,27 @@ class ConversationRepository:
         ).fetchone()
         if row is None:
             raise KeyError(message_id)
+        return row
+
+    def _attachment_row(
+        self,
+        connection: sqlite3.Connection,
+        conversation_id: str,
+        attachment_id: str,
+    ) -> sqlite3.Row:
+        row = connection.execute(
+            """
+            SELECT attachments.*, corrected_ocr_texts.encrypted_text
+            FROM attachments
+            LEFT JOIN corrected_ocr_texts
+                ON corrected_ocr_texts.attachment_id = attachments.id
+                AND corrected_ocr_texts.conversation_id = attachments.conversation_id
+            WHERE attachments.conversation_id = ? AND attachments.id = ?
+            """,
+            (conversation_id, attachment_id),
+        ).fetchone()
+        if row is None:
+            raise KeyError(attachment_id)
         return row
 
     def _touch_conversation(
@@ -816,6 +1000,21 @@ class ConversationRepository:
             start_message_id=row["start_message_id"],
             end_message_id=row["end_message_id"],
             context_version=row["context_version"],
+            created_at=self._parse_time(row["created_at"]),
+        )
+
+    def _attachment_from_row(self, row: sqlite3.Row) -> Attachment:
+        encrypted_text = row["encrypted_text"]
+        return Attachment(
+            id=row["id"],
+            conversation_id=row["conversation_id"],
+            encrypted_path=Path(self._decrypt_text(row["encrypted_path"])),
+            encrypted_data_key=row["encrypted_data_key"],
+            corrected_text=(
+                self._decrypt_text(encrypted_text)
+                if encrypted_text is not None
+                else None
+            ),
             created_at=self._parse_time(row["created_at"]),
         )
 

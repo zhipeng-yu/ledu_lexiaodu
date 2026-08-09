@@ -490,3 +490,65 @@ def test_repository_enables_foreign_keys_wal_and_secure_delete(database_path, ci
         assert configured_connection.execute("PRAGMA secure_delete").fetchone()[0] == 1
 
     assert any(row[2] == "conversations" for row in foreign_key_rows)
+
+
+def test_attachment_metadata_and_corrected_text_are_conversation_scoped_and_encrypted(
+    repository, database_path
+) -> None:
+    first = repository.create_conversation("first")
+    second = repository.create_conversation("second")
+    attachment = repository.save_attachment(
+        first.id,
+        "a" * 32,
+        database_path.parent / "RANDOM-ATTACHMENT-PATH.bin",
+        b"encrypted-data-key",
+    )
+
+    corrected = repository.save_corrected_text(
+        first.id,
+        attachment.id,
+        "CORRECTED-OCR-UNIQUE-SENTINEL",
+    )
+
+    assert corrected.corrected_text == "CORRECTED-OCR-UNIQUE-SENTINEL"
+    assert repository.get_attachment(first.id, attachment.id) == corrected
+    assert repository.list_attachments(first.id) == (corrected,)
+    assert repository.list_attachments(second.id) == ()
+    with pytest.raises(KeyError):
+        repository.get_attachment(second.id, attachment.id)
+    with pytest.raises(KeyError):
+        repository.save_corrected_text(second.id, attachment.id, "cross-thread")
+
+    raw = database_path.read_bytes()
+    wal_path = database_path.with_name(database_path.name + "-wal")
+    if wal_path.exists():
+        raw += wal_path.read_bytes()
+    assert b"RANDOM-ATTACHMENT-PATH" not in raw
+    assert b"CORRECTED-OCR-UNIQUE-SENTINEL" not in raw
+
+
+def test_conversation_deletion_queues_attachment_cleanup_until_completed(
+    repository, tmp_path
+) -> None:
+    conversation = repository.create_conversation("delete attachments")
+    encrypted_path = tmp_path / "attachment.bin"
+    attachment = repository.save_attachment(
+        conversation.id,
+        "b" * 32,
+        encrypted_path,
+        b"encrypted-data-key",
+    )
+
+    repository.delete_conversation(conversation.id)
+
+    jobs = repository.list_cleanup_jobs("delete_attachment")
+    assert len(jobs) == 1
+    assert jobs[0].conversation_id == conversation.id
+    assert jobs[0].payload == str(encrypted_path)
+    with pytest.raises(KeyError):
+        repository.get_attachment(conversation.id, attachment.id)
+
+    repository.complete_cleanup_job(jobs[0].id)
+    repository.complete_cleanup_job(jobs[0].id)
+
+    assert repository.list_cleanup_jobs("delete_attachment") == ()

@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QTableWidget,
 )
 
-from lexiaodu.editor import TranscriptEditor
+from lexiaodu.editor import CorrectedTranscript, TranscriptEditor
 from lexiaodu.ocr import Speaker, TranscriptLine
 
 
@@ -69,4 +69,31 @@ def test_ocr_editor_requires_explicit_confirmation_to_generate() -> None:
 
     confirm.click()
     assert accepted == [True]
+    editor.close()
+
+
+def test_corrected_transcript_result_is_neutral_draft_text() -> None:
+    application = QApplication.instance() or QApplication([])
+    editor = TranscriptEditor(
+        [
+            TranscriptLine(speaker=Speaker.PARENT, text="uncorrected parent"),
+            TranscriptLine(speaker=Speaker.ADVISOR, text="uncorrected advisor"),
+        ]
+    )
+    table = editor.findChild(QTableWidget, "transcriptTable")
+
+    assert application is not None
+    assert table is not None
+    table.item(0, 1).setText("corrected parent")
+    table.item(1, 1).setText("corrected advisor")
+
+    result = editor.corrected_transcript()
+
+    assert result == CorrectedTranscript(
+        lines=(
+            TranscriptLine(speaker=Speaker.PARENT, text="corrected parent"),
+            TranscriptLine(speaker=Speaker.ADVISOR, text="corrected advisor"),
+        ),
+        text="corrected parent\ncorrected advisor",
+    )
     editor.close()
