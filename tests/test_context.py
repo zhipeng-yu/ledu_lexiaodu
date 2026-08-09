@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from threading import Event, Thread
 
 import pytest
 
@@ -277,3 +278,124 @@ def test_summary_failure_keeps_original_messages_available_for_fallback(
     ).build(conversation.id, "draft")
     assert package.summary is None
     assert package.recent_messages == (first, second)
+
+
+@pytest.mark.parametrize("mutation", ("edit", "delete"))
+def test_summary_coordinator_rejects_covered_mutation_during_summarization(
+    repository, mutation
+) -> None:
+    conversation = repository.create_conversation("summary race")
+    first = repository.append_user_message(
+        conversation.id, "before edit", request_id="summary-race-first"
+    )
+    second = repository.append_user_message(
+        conversation.id, "second", request_id="summary-race-second"
+    )
+    summarizer_started = Event()
+    release_summarizer = Event()
+    errors: list[BaseException] = []
+
+    class BlockingSummarizer:
+        def summarize(
+            self,
+            messages: tuple[Message, ...],
+            covered_range: tuple[str, str],
+            context_version: int,
+        ) -> str:
+            summarizer_started.set()
+            assert release_summarizer.wait(5)
+            return "stale generated summary"
+
+    def generate_summary() -> None:
+        try:
+            SummaryCoordinator(repository, BlockingSummarizer()).summarize(
+                conversation.id, first.id, second.id
+            )
+        except BaseException as error:
+            errors.append(error)
+
+    worker = Thread(target=generate_summary)
+    worker.start()
+    assert summarizer_started.wait(5)
+
+    if mutation == "edit":
+        repository.edit_message(conversation.id, first.id, "after edit")
+    else:
+        repository.delete_message(conversation.id, first.id)
+    release_summarizer.set()
+    worker.join(5)
+
+    assert not worker.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], ValueError)
+    assert str(errors[0]) == "Messages changed during summarization"
+    assert repository.list_context_summaries(conversation.id) == ()
+    expected_bodies = ("after edit", "second") if mutation == "edit" else ("second",)
+    assert tuple(
+        message.body for message in repository.list_messages(conversation.id)
+    ) == expected_bodies
+
+
+def test_builder_never_combines_records_from_different_read_snapshots(
+    repository, monkeypatch
+) -> None:
+    conversation = repository.create_conversation("builder snapshot")
+    first = repository.append_user_message(
+        conversation.id, "covered", request_id="snapshot-first"
+    )
+    repository.append_user_message(
+        conversation.id, "recent", request_id="snapshot-second"
+    )
+    summary = repository.save_context_summary(
+        conversation.id,
+        "old summary",
+        start_message_id=first.id,
+        end_message_id=first.id,
+        context_version=conversation.context_version,
+    )
+    message_read_started = Event()
+    release_reader = Event()
+    original_message_from_row = repository._message_from_row
+    paused = False
+
+    def pause_during_message_read(row):
+        nonlocal paused
+        if not paused:
+            paused = True
+            message_read_started.set()
+            assert release_reader.wait(5)
+        return original_message_from_row(row)
+
+    monkeypatch.setattr(repository, "_message_from_row", pause_during_message_read)
+    packages = []
+    errors: list[BaseException] = []
+
+    def build_context() -> None:
+        try:
+            packages.append(
+                ContextBuilder(
+                    repository,
+                    recent_limit=2,
+                    related_limit=0,
+                    character_budget=500,
+                ).build(conversation.id, "draft")
+            )
+        except BaseException as error:
+            errors.append(error)
+
+    worker = Thread(target=build_context)
+    worker.start()
+    assert message_read_started.wait(5)
+
+    repository.edit_message(conversation.id, first.id, "edited covered")
+    new_fact = repository.save_confirmed_fact(conversation.id, "new concurrent fact")
+    release_reader.set()
+    worker.join(5)
+
+    assert not worker.is_alive()
+    assert errors == []
+    assert len(packages) == 1
+    package = packages[0]
+    assert not (package.summary == summary and new_fact in package.confirmed_facts)
+    assert repository.get_conversation(conversation.id).context_version == 2
+    assert repository.list_confirmed_facts(conversation.id) == (new_fact,)

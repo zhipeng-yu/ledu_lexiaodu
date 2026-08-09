@@ -53,10 +53,13 @@ class ContextBuilder:
         self._character_budget = character_budget
 
     def build(self, conversation_id: str, current_text: str) -> ContextPackage:
-        conversation = self._repository.get_conversation(conversation_id)
-        messages = self._repository.list_messages(conversation_id)
+        snapshot = self._repository.load_context_snapshot(conversation_id)
+        conversation = snapshot.conversation
+        messages = snapshot.messages
         summary, available_messages = self._valid_summary(
-            conversation_id, conversation.context_version, messages
+            conversation.context_version,
+            messages,
+            snapshot.context_summaries,
         )
         recent_messages = (
             available_messages[-self._recent_limit :]
@@ -69,29 +72,24 @@ class ContextBuilder:
             else available_messages
         )
         related_messages = self._related_messages(older_messages, current_text)
-        confirmed_facts = self._repository.list_confirmed_facts(conversation_id)
-        attachment_texts = self._repository.list_attachment_texts(conversation_id)
-
         package = ContextPackage(
-            confirmed_facts=confirmed_facts,
+            confirmed_facts=snapshot.confirmed_facts,
             summary=summary,
             recent_messages=recent_messages,
             related_messages=related_messages,
-            attachment_texts=attachment_texts,
+            attachment_texts=snapshot.attachment_texts,
             context_version=conversation.context_version,
         )
         return self._fit_budget(package, reserved_characters=len(current_text))
 
     def _valid_summary(
         self,
-        conversation_id: str,
         context_version: int,
         messages: tuple[Message, ...],
+        summaries: tuple[ContextSummary, ...],
     ) -> tuple[ContextSummary | None, tuple[Message, ...]]:
         message_indexes = {message.id: index for index, message in enumerate(messages)}
-        for summary in reversed(
-            self._repository.list_context_summaries(conversation_id)
-        ):
+        for summary in reversed(summaries):
             if summary.context_version != context_version:
                 continue
             if (
@@ -209,6 +207,10 @@ class SummaryCoordinator:
             start_message_id=start_message_id,
             end_message_id=end_message_id,
             context_version=conversation.context_version,
+            expected_message_revisions=tuple(
+                (message.id, message.content_revision)
+                for message in covered_messages
+            ),
         )
 
 

@@ -592,6 +592,12 @@ def test_equal_timestamps_preserve_true_message_append_order(
 
     assert repository.list_messages(conversation.id) == appended
 
+    for index in range(3):
+        repository.mark_request_failed(conversation.id, f"same-time-{index}")
+    assert tuple(
+        request.body for request in repository.list_retryable_requests(conversation.id)
+    ) == ("first", "second", "third")
+
 
 def test_message_changes_invalidate_only_summaries_covering_the_message(
     repository,
@@ -645,3 +651,65 @@ def test_attachment_text_listing_filters_uncorrected_and_other_conversations(
     repository.save_corrected_text(second.id, other.id, "SECOND OCR")
 
     assert repository.list_attachment_texts(first.id) == (corrected,)
+
+
+def test_legacy_messages_gain_append_order_and_content_revision(
+    database_path, cipher
+) -> None:
+    created_at = datetime(2026, 8, 9, 12, 0, tzinfo=UTC).isoformat()
+    with sqlite3.connect(database_path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE conversations (
+                id TEXT PRIMARY KEY,
+                encrypted_title BLOB NOT NULL,
+                status TEXT NOT NULL,
+                context_version INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                deleted_at TEXT
+            );
+            CREATE TABLE messages (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL REFERENCES conversations(id),
+                role TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                encrypted_body BLOB NOT NULL,
+                request_id TEXT UNIQUE,
+                in_reply_to_request_id TEXT UNIQUE,
+                processing_status TEXT NOT NULL,
+                encrypted_model_metadata BLOB,
+                created_at TEXT NOT NULL
+            );
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO conversations(
+                id, encrypted_title, status, context_version,
+                created_at, updated_at, deleted_at
+            ) VALUES ('legacy', ?, 'active', 1, ?, ?, NULL)
+            """,
+            (cipher.encrypt(b"legacy"), created_at, created_at),
+        )
+        for message_id, body, request_id in (
+            ("z-message", "first", "legacy-first"),
+            ("a-message", "second", "legacy-second"),
+            ("m-message", "third", "legacy-third"),
+        ):
+            connection.execute(
+                """
+                INSERT INTO messages(
+                    id, conversation_id, role, kind, encrypted_body,
+                    request_id, in_reply_to_request_id, processing_status,
+                    encrypted_model_metadata, created_at
+                ) VALUES (?, 'legacy', 'user', 'text', ?, ?, NULL, 'pending', NULL, ?)
+                """,
+                (message_id, cipher.encrypt(body.encode()), request_id, created_at),
+            )
+
+    repository = ConversationRepository(database_path, cipher)
+    messages = repository.list_messages("legacy")
+
+    assert tuple(message.body for message in messages) == ("first", "second", "third")
+    assert tuple(message.content_revision for message in messages) == (1, 1, 1)

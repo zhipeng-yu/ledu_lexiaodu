@@ -38,6 +38,7 @@ class Message:
     processing_status: str
     created_at: datetime
     model_metadata: str | None = None
+    content_revision: int = 1
 
     @property
     def text(self) -> str:
@@ -105,6 +106,15 @@ class Attachment:
 
 
 @dataclass(frozen=True, slots=True)
+class ConversationContextSnapshot:
+    conversation: Conversation
+    messages: tuple[Message, ...]
+    confirmed_facts: tuple[ConfirmedFact, ...]
+    context_summaries: tuple[ContextSummary, ...]
+    attachment_texts: tuple[Attachment, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class CleanupJob:
     id: str
     conversation_id: str
@@ -162,7 +172,8 @@ class ConversationRepository:
                     processing_status TEXT NOT NULL,
                     encrypted_model_metadata BLOB,
                     created_at TEXT NOT NULL,
-                    append_order INTEGER NOT NULL
+                    append_order INTEGER NOT NULL,
+                    content_revision INTEGER NOT NULL DEFAULT 1
                 );
                 CREATE INDEX IF NOT EXISTS messages_by_conversation
                     ON messages(conversation_id, created_at, id);
@@ -215,7 +226,7 @@ class ConversationRepository:
                     ON cleanup_jobs(conversation_id, status, created_at, id);
                 """
             )
-            self._ensure_message_append_order(connection)
+            self._ensure_message_columns(connection)
             connection.execute(
                 """
                 CREATE UNIQUE INDEX IF NOT EXISTS messages_by_append_order
@@ -433,7 +444,8 @@ class ConversationRepository:
             )
             connection.execute(
                 """
-                UPDATE messages SET encrypted_body = ?
+                UPDATE messages
+                SET encrypted_body = ?, content_revision = content_revision + 1
                 WHERE id = ? AND conversation_id = ?
                 """,
                 (self._encrypt_text(body), message_id, conversation_id),
@@ -492,7 +504,7 @@ class ConversationRepository:
                 SELECT * FROM messages
                 WHERE conversation_id = ? AND role = 'user'
                     AND processing_status IN ('failed', 'interrupted')
-                ORDER BY created_at, id
+                ORDER BY append_order
                 """,
                 (conversation_id,),
             ).fetchall()
@@ -544,6 +556,7 @@ class ConversationRepository:
         start_message_id: str,
         end_message_id: str,
         context_version: int,
+        expected_message_revisions: tuple[tuple[str, int], ...] | None = None,
     ) -> ContextSummary:
         now = self._now()
         summary = ContextSummary(
@@ -560,8 +573,36 @@ class ConversationRepository:
             conversation = self._active_conversation_row(connection, conversation_id)
             if context_version != conversation["context_version"]:
                 raise ValueError("Context summary version is stale")
-            self._message_row(connection, conversation_id, start_message_id)
-            self._message_row(connection, conversation_id, end_message_id)
+            try:
+                start_message = self._message_row(
+                    connection, conversation_id, start_message_id
+                )
+                end_message = self._message_row(
+                    connection, conversation_id, end_message_id
+                )
+            except KeyError:
+                if expected_message_revisions is not None:
+                    raise ValueError(
+                        "Messages changed during summarization"
+                    ) from None
+                raise
+            if expected_message_revisions is not None:
+                lower, upper = sorted(
+                    (start_message["append_order"], end_message["append_order"])
+                )
+                current_revisions = tuple(
+                    (row["id"], row["content_revision"])
+                    for row in connection.execute(
+                        """
+                        SELECT id, content_revision FROM messages
+                        WHERE conversation_id = ? AND append_order BETWEEN ? AND ?
+                        ORDER BY append_order
+                        """,
+                        (conversation_id, lower, upper),
+                    ).fetchall()
+                )
+                if current_revisions != expected_message_revisions:
+                    raise ValueError("Messages changed during summarization")
             connection.execute(
                 """
                 INSERT INTO context_summaries(
@@ -676,6 +717,64 @@ class ConversationRepository:
                 (conversation_id,),
             ).fetchall()
         return tuple(self._attachment_from_row(row) for row in rows)
+
+    def load_context_snapshot(
+        self, conversation_id: str
+    ) -> ConversationContextSnapshot:
+        with self._connect() as connection:
+            connection.execute("BEGIN")
+            conversation_row = self._active_conversation_row(
+                connection, conversation_id
+            )
+            message_rows = connection.execute(
+                """
+                SELECT * FROM messages
+                WHERE conversation_id = ?
+                ORDER BY append_order
+                """,
+                (conversation_id,),
+            ).fetchall()
+            fact_rows = connection.execute(
+                """
+                SELECT * FROM confirmed_facts
+                WHERE conversation_id = ?
+                ORDER BY created_at, id
+                """,
+                (conversation_id,),
+            ).fetchall()
+            summary_rows = connection.execute(
+                """
+                SELECT * FROM context_summaries
+                WHERE conversation_id = ?
+                ORDER BY created_at, id
+                """,
+                (conversation_id,),
+            ).fetchall()
+            attachment_rows = connection.execute(
+                """
+                SELECT attachments.*, corrected_ocr_texts.encrypted_text
+                FROM attachments
+                JOIN corrected_ocr_texts
+                    ON corrected_ocr_texts.attachment_id = attachments.id
+                    AND corrected_ocr_texts.conversation_id = attachments.conversation_id
+                WHERE attachments.conversation_id = ?
+                ORDER BY attachments.created_at, attachments.id
+                """,
+                (conversation_id,),
+            ).fetchall()
+            return ConversationContextSnapshot(
+                conversation=self._conversation_from_row(conversation_row),
+                messages=tuple(self._message_from_row(row) for row in message_rows),
+                confirmed_facts=tuple(
+                    self._confirmed_fact_from_row(row) for row in fact_rows
+                ),
+                context_summaries=tuple(
+                    self._context_summary_from_row(row) for row in summary_rows
+                ),
+                attachment_texts=tuple(
+                    self._attachment_from_row(row) for row in attachment_rows
+                ),
+            )
 
     def save_corrected_text(
         self,
@@ -847,8 +946,8 @@ class ConversationRepository:
             INSERT INTO messages(
                 id, conversation_id, role, kind, encrypted_body,
                 request_id, in_reply_to_request_id, processing_status,
-                encrypted_model_metadata, created_at, append_order
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                encrypted_model_metadata, created_at, append_order, content_revision
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
             """,
             (
                 message.id,
@@ -865,11 +964,19 @@ class ConversationRepository:
             ),
         )
 
-    def _ensure_message_append_order(
+    def _ensure_message_columns(
         self, connection: sqlite3.Connection
     ) -> None:
-        if "append_order" not in self._table_columns(connection, "messages"):
+        columns = self._table_columns(connection, "messages")
+        if "append_order" not in columns:
             connection.execute("ALTER TABLE messages ADD COLUMN append_order INTEGER")
+        if "content_revision" not in columns:
+            connection.execute(
+                """
+                ALTER TABLE messages
+                ADD COLUMN content_revision INTEGER NOT NULL DEFAULT 1
+                """
+            )
         rows = connection.execute(
             """
             SELECT rowid, conversation_id FROM messages
@@ -1139,6 +1246,7 @@ class ConversationRepository:
                 if encrypted_metadata is not None
                 else None
             ),
+            content_revision=row["content_revision"],
         )
 
     def _pending_request_from_row(self, row: sqlite3.Row) -> PendingRequest:
