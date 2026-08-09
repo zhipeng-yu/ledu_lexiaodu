@@ -119,7 +119,14 @@ def test_user_request_is_persisted_before_processing_and_failure_is_retryable(
     assert repository.list_retryable_requests(conversation.id) == (failed,)
 
 
-def test_restart_marks_processing_requests_interrupted(database_path, cipher) -> None:
+@pytest.mark.parametrize(
+    "mark_processing",
+    [False, True],
+    ids=["pending", "processing"],
+)
+def test_restart_marks_unfinished_requests_interrupted(
+    database_path, cipher, mark_processing: bool
+) -> None:
     first_repository = ConversationRepository(
         database_path, cipher, clock=AdvancingClock()
     )
@@ -127,9 +134,10 @@ def test_restart_marks_processing_requests_interrupted(database_path, cipher) ->
     first_repository.append_user_message(
         conversation.id, "INTERRUPTED-BODY", request_id="restart-request"
     )
-    first_repository.mark_request_processing(
-        conversation.id, "restart-request", model_metadata="RESTART-MODEL"
-    )
+    if mark_processing:
+        first_repository.mark_request_processing(
+            conversation.id, "restart-request", model_metadata="RESTART-MODEL"
+        )
 
     reopened = ConversationRepository(database_path, cipher, clock=AdvancingClock())
 

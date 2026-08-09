@@ -1,16 +1,29 @@
 # 乐小读五分钟演示脚本
 
-本脚本只使用虚构演示对话，不截取真实家长聊天。演示前应完成 `docs/MANUAL_TEST_CHECKLIST.md` 的环境项。
+本脚本只使用虚构演示对话，不截取真实家长聊天。它演示的是 `legacy` 回滚工具条流程，不代表默认独立聊天窗口。演示前应完成 `docs/MANUAL_TEST_CHECKLIST.md` 的环境项。
 
 ## 0:00–1:00 预检与启动
 
 在项目根目录执行：
 
 ```powershell
+$hadUiMode = Test-Path Env:LEXIAODU_UI_MODE
+$previousUiMode = $env:LEXIAODU_UI_MODE
 $env:PYTHONIOENCODING = 'utf-8'
-.\.venv\python.exe -B scripts\verify_day5_queries.py
-.\.venv\python.exe -B scripts\verify_doubao.py
-.\.venv\python.exe -m lexiaodu
+try {
+    $env:LEXIAODU_UI_MODE = 'legacy'
+    .\.venv\python.exe -B scripts\verify_day5_queries.py
+    .\.venv\python.exe -B scripts\verify_doubao.py
+    .\.venv\python.exe -m lexiaodu
+}
+finally {
+    if ($hadUiMode) {
+        $env:LEXIAODU_UI_MODE = $previousUiMode
+    }
+    else {
+        Remove-Item Env:LEXIAODU_UI_MODE -ErrorAction SilentlyContinue
+    }
+}
 ```
 
 预期四个固定查询均显示 `[PASS]`，目标资料排名不超过 3；豆包鉴权、模型调用和 JSON 输出也显示 `[PASS]`，随后屏幕顶部出现“乐小读”悬浮工具条。真实豆包预检会产生少量 Token 费用。
@@ -54,6 +67,6 @@ $env:PYTHONIOENCODING = 'utf-8'
 1. 选择“有用”或“无用”，选一个枚举原因并提交。
 2. 悬浮工具条应显示“反馈已记录（未保存聊天正文）”。
 3. 说明反馈库只含建议 ID、有用状态、枚举原因和时间戳。
-4. 关闭应用；聊天和建议历史不会跨进程保留。
+4. 关闭应用；本脚本演示的 `legacy` 聊天和建议历史不会跨进程保留。默认独立聊天窗口的加密历史持久化不在本脚本流程内。
 
 若任一步未满足预期，停止正式演示并按手动清单记录阻断，不临场修改知识或关闭风险门控。

@@ -136,13 +136,14 @@ class DataCipher:
             key = protector.unprotect(key_path.read_bytes())
         else:
             key = os.urandom(_MASTER_KEY_BYTES)
-            cls._write_protected_key(key_path, protector.protect(key))
+            if not cls._write_protected_key(key_path, protector.protect(key)):
+                key = protector.unprotect(key_path.read_bytes())
         if len(key) != _MASTER_KEY_BYTES:
             raise LocalEncryptionUnavailable("The local encryption key is invalid")
         return cls(key)
 
     @staticmethod
-    def _write_protected_key(key_path: Path, protected_key: bytes) -> None:
+    def _write_protected_key(key_path: Path, protected_key: bytes) -> bool:
         key_path.parent.mkdir(parents=True, exist_ok=True)
         temp_path: Path | None = None
         try:
@@ -157,7 +158,11 @@ class DataCipher:
                 temporary_file.write(protected_key)
                 temporary_file.flush()
                 os.fsync(temporary_file.fileno())
-            os.replace(temp_path, key_path)
+            try:
+                os.link(temp_path, key_path)
+            except FileExistsError:
+                return False
+            return True
         finally:
             if temp_path is not None:
                 temp_path.unlink(missing_ok=True)

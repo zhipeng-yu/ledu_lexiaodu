@@ -288,6 +288,8 @@ def build_chat_runtime(
     application = QApplication.instance()
     if application is not None:
         application.setQuitOnLastWindowClosed(True)
+        window.close_requested.connect(controller.shutdown)
+        window.close_requested.connect(application.quit)
         application.aboutToQuit.connect(controller.shutdown)
     window.show()
     return ChatRuntime(

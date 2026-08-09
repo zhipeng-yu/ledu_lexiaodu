@@ -9,8 +9,9 @@ from concurrent.futures import Future
 from pathlib import Path
 from typing import Any
 
+import pytest
 from PySide6.QtCore import QObject, Signal
-from PySide6.QtGui import QColor, QImage
+from PySide6.QtGui import QColor, QGuiApplication, QImage
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from lexiaodu.attachments import AttachmentStore
@@ -34,6 +35,7 @@ class FakeWindow(QObject):
     send_requested = Signal(str)
     retry_requested = Signal(str)
     capture_requested = Signal()
+    paste_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -418,8 +420,13 @@ def test_retry_reuses_request_id_and_repeated_retry_cannot_add_two_answers(
     assert assistant_executor.pending == []
 
 
-def test_reconstruction_shows_interrupted_request_without_auto_sending(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    "mark_processing",
+    [False, True],
+    ids=["pending", "processing"],
+)
+def test_reconstruction_shows_unfinished_request_without_auto_sending(
+    tmp_path: Path, mark_processing: bool
 ) -> None:
     application()
     database_path = tmp_path / "chat.sqlite3"
@@ -430,10 +437,11 @@ def test_reconstruction_shows_interrupted_request_without_auto_sending(
         "INTERRUPTED-QUESTION",
         request_id="restart-request",
     )
-    first_repository.mark_request_processing(
-        conversation.id,
-        "restart-request",
-    )
+    if mark_processing:
+        first_repository.mark_request_processing(
+            conversation.id,
+            "restart-request",
+        )
 
     reopened = repository_at(database_path)
     assistant = RecordingAssistant(reopened, ["MUST-NOT-RUN"])
@@ -545,6 +553,148 @@ def test_screenshot_uses_capture_start_owner_and_sends_only_corrected_context(
     assert first_messages[1].body == "SCREENSHOT-ANSWER"
     assert repository.list_messages(second.id) == ()
     assert window.active_conversation_id == second.id
+
+
+def test_paste_screenshot_keeps_start_owner_and_only_sends_corrected_text(
+    tmp_path: Path,
+) -> None:
+    application()
+    repository = repository_at(tmp_path / "chat.sqlite3")
+    first = repository.create_conversation("paste owner")
+    second = repository.create_conversation("later selection")
+    attachments = AttachmentStore(
+        tmp_path / "attachments",
+        repository,
+        DataCipher(b"c" * 32),
+    )
+    image = QImage(4, 3, QImage.Format.Format_RGB32)
+    image.fill(QColor(17, 31, 47))
+    QGuiApplication.clipboard().setImage(image)
+    ocr = FakeOcr([TranscriptLine(Speaker.PARENT, "FABRICATED-RAW-OCR")])
+    selectors: list[FakeSelector] = []
+    editors: list[FakeEditor] = []
+
+    def selector_factory() -> FakeSelector:
+        selector = FakeSelector()
+        selectors.append(selector)
+        return selector
+
+    def editor_factory(
+        lines: Sequence[TranscriptLine], notice: str
+    ) -> FakeEditor:
+        editor = FakeEditor(lines, notice, "FABRICATED-CORRECTED-OCR")
+        editors.append(editor)
+        return editor
+
+    assistant = RecordingAssistant(repository, ["FABRICATED-PASTE-ANSWER"])
+    assistant_executor = ManualExecutor()
+    ocr_executor = ManualExecutor()
+    window = FakeWindow()
+    controller = ChatController(
+        window,
+        repository,
+        attachments,
+        context_builder(repository),
+        assistant,
+        FakeCapture(QImage()),
+        ocr,
+        selector_factory,
+        editor_factory,
+        assistant_executor,
+        ocr_executor,
+    )
+    ocr_executor.run_next()  # preload
+
+    try:
+        window.select(first.id)
+        window.paste_requested.emit()
+        assert len(ocr_executor.pending) == 1
+
+        window.paste_requested.emit()
+        window.capture_requested.emit()
+        assert len(ocr_executor.pending) == 1
+        assert selectors == []
+
+        window.select(second.id)
+        ocr_executor.run_next()
+        assert len(editors) == 1
+        assert editors[0].lines[0].text == "FABRICATED-RAW-OCR"
+        editors[0].accepted.emit()
+
+        first_attachments = attachments.list_for_conversation(first.id)
+        assert len(first_attachments) == 1
+        assert first_attachments[0].corrected_text == "FABRICATED-CORRECTED-OCR"
+        assert attachments.list_for_conversation(second.id) == ()
+        assistant_executor.run_next()
+
+        package, _request_id = assistant.calls[0]
+        assert package.attachment_texts == first_attachments
+        assert "FABRICATED-CORRECTED-OCR" in package.render_for_model()
+        assert "FABRICATED-RAW-OCR" not in package.render_for_model()
+        assert not any(isinstance(item, QImage) for item in package.all_items())
+        assert [message.body for message in repository.list_messages(first.id)] == [
+            "FABRICATED-CORRECTED-OCR",
+            "FABRICATED-PASTE-ANSWER",
+        ]
+        assert repository.list_messages(second.id) == ()
+        assert window.active_conversation_id == second.id
+    finally:
+        QGuiApplication.clipboard().clear()
+        controller.shutdown()
+
+
+def test_paste_screenshot_ignores_no_owner_and_reports_empty_clipboard(
+    tmp_path: Path, monkeypatch
+) -> None:
+    application()
+    repository = repository_at(tmp_path / "chat.sqlite3")
+    conversation = repository.create_conversation("paste preconditions")
+    attachments = AttachmentStore(
+        tmp_path / "attachments",
+        repository,
+        DataCipher(b"c" * 32),
+    )
+    image = QImage(2, 2, QImage.Format.Format_RGB32)
+    image.fill(QColor("white"))
+    ocr_executor = ManualExecutor()
+    notices: list[str] = []
+    monkeypatch.setattr(
+        "lexiaodu.chat_controller.QMessageBox.information",
+        lambda _parent, _title, message: notices.append(message),
+    )
+    window = FakeWindow()
+    controller = ChatController(
+        window,
+        repository,
+        attachments,
+        context_builder(repository),
+        RecordingAssistant(repository, []),
+        FakeCapture(image),
+        FakeOcr(),
+        FakeSelector,
+        lambda lines, notice: FakeEditor(lines, notice, "unused"),
+        ManualExecutor(),
+        ocr_executor,
+    )
+    ocr_executor.run_next()  # preload
+
+    try:
+        QGuiApplication.clipboard().setImage(image)
+        window.paste_requested.emit()
+        assert ocr_executor.pending == []
+        assert attachments.list_for_conversation(conversation.id) == ()
+
+        window.select(conversation.id)
+        QGuiApplication.clipboard().clear()
+        window.paste_requested.emit()
+
+        assert ocr_executor.pending == []
+        assert attachments.list_for_conversation(conversation.id) == ()
+        assert len(notices) == 1
+        assert "剪贴板" in notices[0] and "图片" in notices[0]
+    finally:
+        QGuiApplication.clipboard().clear()
+        controller.shutdown()
 
 
 def test_shutdown_closes_and_deletes_an_open_transcript_editor(

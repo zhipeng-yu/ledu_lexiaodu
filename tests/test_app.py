@@ -8,7 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtCore import QEvent, QTimer
 from PySide6.QtGui import QColor, QFont, QImage
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QWidget
 
 from lexiaodu.app import (
     OfflineDemoAssistant,
@@ -37,6 +37,26 @@ from lexiaodu.toolbar import FloatingToolbar
 
 
 _APPLICATION: QApplication | None = None
+
+
+class _RecordingAuxiliaryWidget(QWidget):
+    def __init__(self) -> None:
+        super().__init__()
+        self.closed = False
+        self.hidden = False
+        self.deleted_later = False
+
+    def close(self) -> bool:
+        self.closed = True
+        return super().close()
+
+    def hide(self) -> None:
+        self.hidden = True
+        super().hide()
+
+    def deleteLater(self) -> None:
+        self.deleted_later = True
+        super().deleteLater()
 
 
 def _application() -> QApplication:
@@ -244,6 +264,12 @@ def test_closing_default_chat_quits_event_loop_and_shuts_down_workers(
         lambda _path: _InertOcr(),
     )
     runtime = build_chat_runtime(_runtime_settings(tmp_path), OfflineDemoAssistant())
+    active_editor = _RecordingAuxiliaryWidget()
+    active_selector = _RecordingAuxiliaryWidget()
+    active_editor.show()
+    active_selector.show()
+    runtime.controller._editor = active_editor
+    runtime.controller._selector = active_selector
     watchdog = QTimer()
     watchdog.setSingleShot(True)
     timed_out: list[bool] = []
@@ -264,6 +290,10 @@ def test_closing_default_chat_quits_event_loop_and_shuts_down_workers(
         runtime.window.close()
 
     assert timed_out == []
+    assert active_editor.closed
+    assert active_editor.deleted_later
+    assert active_selector.hidden
+    assert active_selector.deleted_later
     with pytest.raises(RuntimeError):
         runtime.assistant_executor.submit(lambda: None)
     with pytest.raises(RuntimeError):

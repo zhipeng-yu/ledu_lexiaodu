@@ -240,7 +240,12 @@ class _ConversationTurn(QWidget):
 class SuggestionCard(QWidget):
     feedback_submitted = Signal(object)
 
-    def __init__(self, suggestion: AdviceSuggestion) -> None:
+    def __init__(
+        self,
+        suggestion: AdviceSuggestion,
+        *,
+        show_feedback: bool = True,
+    ) -> None:
         super().__init__()
         self._suggestion = suggestion
         self._feedback_value: bool | None = None
@@ -396,6 +401,8 @@ class SuggestionCard(QWidget):
         self._feedback_status.setObjectName("feedbackStatus")
         feedback_layout.addWidget(self._feedback_status)
         feedback_layout.addStretch()
+        feedback_frame.setEnabled(show_feedback)
+        feedback_frame.setVisible(show_feedback)
         content_layout.addWidget(feedback_frame)
 
         row_layout.addWidget(content, 8)

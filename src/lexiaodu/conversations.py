@@ -256,7 +256,8 @@ class ConversationRepository:
                 """
                 UPDATE messages
                 SET processing_status = 'interrupted'
-                WHERE role = 'user' AND processing_status = 'processing'
+                WHERE role = 'user'
+                    AND processing_status IN ('pending', 'processing')
                 """
             )
 

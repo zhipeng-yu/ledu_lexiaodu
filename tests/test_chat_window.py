@@ -119,6 +119,7 @@ def test_enter_sends_and_shift_enter_inserts_a_line_break() -> None:
     window.send_requested.connect(submitted.append)
     assert composer is not None
 
+    window.show_conversation("conversation-a", ())
     window.show()
     composer.setFocus()
     composer.setPlainText("第一行")
@@ -211,14 +212,23 @@ def test_workspace_actions_emit_the_selected_id_and_search_text() -> None:
         assert button is not None
         QTest.mouseClick(button, Qt.MouseButton.LeftButton)
 
+    generate = window.findChild(QPushButton, "generateReply")
+    drawer = window.findChild(QPushButton, "openContextDrawer")
+    assert generate is not None
+    assert drawer is not None
+    assert not generate.isEnabled()
+    assert "离线" in generate.toolTip() and "暂" in generate.toolTip()
+    assert not drawer.isEnabled()
+    assert "暂" in drawer.toolTip()
+
     assert created == [True]
     assert renamed == ["stored-id"]
     assert deleted == ["stored-id"]
     assert searched == ["英语开口"]
     assert captured == [True]
     assert pasted == [True]
-    assert generated == ["stored-id"]
-    assert drawers == ["stored-id"]
+    assert generated == []
+    assert drawers == []
     assert application is not None
     window.close()
 
@@ -257,6 +267,70 @@ def test_replacing_sidebar_cannot_emit_actions_for_a_stale_conversation() -> Non
     window.close()
 
 
+def test_sidebar_refresh_preserves_the_active_conversation_and_private_view() -> None:
+    application = _application()
+    window = ChatMainWindow()
+    sidebar = window.findChild(QListWidget, "conversationSidebar")
+    timeline = window.findChild(QListWidget, "messageTimeline")
+    assert sidebar is not None
+    assert timeline is not None
+
+    window.set_conversations(
+        (
+            ChatConversationView("a", "会话 A"),
+            ChatConversationView("b", "会话 B"),
+        )
+    )
+    sidebar.setCurrentRow(0)
+    window.show_conversation(
+        "a", (ChatTurnView("private-a", "user", "FABRICATED-PRIVATE-A"),)
+    )
+
+    window.set_conversations((ChatConversationView("a", "会话 A 已刷新"),))
+
+    assert window.active_conversation_id == "a"
+    assert sidebar.currentItem() is not None
+    assert sidebar.currentItem().data(Qt.ItemDataRole.UserRole) == "a"
+    assert timeline.count() == 1
+    assert application is not None
+    window.close()
+
+
+def test_sidebar_refresh_without_owner_clears_private_view_and_keeps_draft() -> None:
+    application = _application()
+    window = ChatMainWindow()
+    sidebar = window.findChild(QListWidget, "conversationSidebar")
+    timeline = window.findChild(QListWidget, "messageTimeline")
+    composer = window.findChild(QPlainTextEdit, "chatComposer")
+    drawer = window.findChild(QFrame, "contextDrawer")
+    submitted: list[str] = []
+    window.send_requested.connect(submitted.append)
+    assert sidebar is not None
+    assert timeline is not None
+    assert composer is not None
+    assert drawer is not None
+
+    window.set_conversations((ChatConversationView("a", "会话 A"),))
+    sidebar.setCurrentRow(0)
+    window.show_conversation(
+        "a", (ChatTurnView("private-a", "assistant", "FABRICATED-PRIVATE-A"),)
+    )
+    window.set_drawer_visible(True)
+    composer.setPlainText("FABRICATED-UNOWNED-DRAFT")
+
+    window.set_conversations((ChatConversationView("b", "会话 B"),))
+
+    assert window.active_conversation_id is None
+    assert sidebar.currentItem() is None
+    assert timeline.count() == 0
+    assert drawer.isHidden()
+    assert not window.submit_composer()
+    assert composer.toPlainText() == "FABRICATED-UNOWNED-DRAFT"
+    assert submitted == []
+    assert application is not None
+    window.close()
+
+
 def test_formal_reply_card_appears_only_when_explicitly_appended() -> None:
     application = _application()
     window = ChatMainWindow()
@@ -277,6 +351,13 @@ def test_formal_reply_card_appears_only_when_explicitly_appended() -> None:
 
     assert window.append_suggestion(_suggestion())
     assert timeline.count() == 2
-    assert timeline.findChild(SuggestionCard) is not None
+    card = timeline.findChild(SuggestionCard)
+    assert card is not None
+    feedback = card.findChild(QFrame, "feedbackPanel")
+    copy_button = card.findChild(QPushButton, "copyReply")
+    assert feedback is not None
+    assert feedback.isHidden()
+    assert not feedback.isEnabled()
+    assert copy_button is not None and copy_button.isEnabled()
     assert application is not None
     window.close()

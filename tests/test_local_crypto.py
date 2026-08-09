@@ -1,3 +1,6 @@
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+
 import pytest
 
 from lexiaodu.local_crypto import DataCipher, DecryptionError
@@ -14,6 +17,17 @@ class RecordingTestProtector:
     def unprotect(self, value: bytes) -> bytes:
         assert value.startswith(b"test-envelope:")
         return value.removeprefix(b"test-envelope:")[::-1]
+
+
+class BarrierTestProtector(RecordingTestProtector):
+    def __init__(self, barrier: Barrier) -> None:
+        super().__init__()
+        self._barrier = barrier
+
+    def protect(self, value: bytes) -> bytes:
+        protected = super().protect(value)
+        self._barrier.wait(timeout=5)
+        return protected
 
 
 def test_cipher_reopens_without_writing_plaintext_key(tmp_path) -> None:
@@ -36,3 +50,25 @@ def test_cipher_rejects_tampered_ciphertext(tmp_path) -> None:
 
     with pytest.raises(DecryptionError):
         cipher.decrypt(tampered)
+
+
+def test_concurrent_first_open_uses_the_single_published_key(tmp_path) -> None:
+    key_path = tmp_path / "chat.key"
+    protector = BarrierTestProtector(Barrier(2))
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        ciphers = tuple(
+            executor.map(lambda _: DataCipher.open(key_path, protector), range(2))
+        )
+
+    reopened = DataCipher.open(key_path, protector)
+    payloads = tuple(
+        cipher.encrypt(f"fabricated-payload-{index}".encode())
+        for index, cipher in enumerate(ciphers)
+    )
+
+    for cipher in (*ciphers, reopened):
+        assert tuple(cipher.decrypt(payload) for payload in payloads) == (
+            b"fabricated-payload-0",
+            b"fabricated-payload-1",
+        )

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from PySide6.QtCore import QSignalBlocker, Qt, Signal, Slot
-from PySide6.QtGui import QInputMethodEvent, QKeyEvent
+from PySide6.QtGui import QCloseEvent, QInputMethodEvent, QKeyEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,
@@ -168,6 +168,7 @@ class ChatMainWindow(QMainWindow):
     generate_reply_requested = Signal(str)
     open_drawer_requested = Signal(str)
     feedback_submitted = Signal(object)
+    close_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -312,6 +313,10 @@ class ChatMainWindow(QMainWindow):
     def active_conversation_id(self) -> str | None:
         return self._active_conversation_id
 
+    def closeEvent(self, event: QCloseEvent) -> None:
+        self.close_requested.emit()
+        super().closeEvent(event)
+
     def _build_sidebar(self) -> QFrame:
         panel = QFrame()
         panel.setObjectName("sidebarPanel")
@@ -392,6 +397,8 @@ class ChatMainWindow(QMainWindow):
         header_layout.addStretch()
         drawer = QPushButton("会话资料")
         drawer.setObjectName("openContextDrawer")
+        drawer.setEnabled(False)
+        drawer.setToolTip("暂不可用：当前没有会话资料来源")
         drawer.clicked.connect(self._request_open_drawer)
         header_layout.addWidget(drawer)
         layout.addWidget(header)
@@ -436,6 +443,8 @@ class ChatMainWindow(QMainWindow):
         actions.addWidget(paste)
         generate = QPushButton("生成正式回复")
         generate.setObjectName("generateReply")
+        generate.setEnabled(False)
+        generate.setToolTip("离线模式暂不支持生成正式回复")
         generate.clicked.connect(self._request_generate_reply)
         actions.addWidget(generate)
         actions.addStretch()
@@ -473,9 +482,10 @@ class ChatMainWindow(QMainWindow):
     def set_conversations(
         self, conversations: tuple[ChatConversationView, ...]
     ) -> None:
+        active_id = self._active_conversation_id
         blocker = QSignalBlocker(self._conversations)
         self._conversations.clear()
-        self._active_conversation_id = None
+        active_item: QListWidgetItem | None = None
         for conversation in conversations:
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, conversation.id)
@@ -483,6 +493,14 @@ class ChatMainWindow(QMainWindow):
             item.setSizeHint(widget.sizeHint())
             self._conversations.addItem(item)
             self._conversations.setItemWidget(item, widget)
+            if conversation.id == active_id:
+                active_item = item
+        if active_item is not None:
+            self._conversations.setCurrentItem(active_item)
+        else:
+            self._active_conversation_id = None
+            self._timeline.clear()
+            self._drawer.hide()
         del blocker
 
     def select_conversation(self, conversation_id: str) -> bool:
@@ -519,7 +537,7 @@ class ChatMainWindow(QMainWindow):
     def append_suggestion(self, suggestion: AdviceSuggestion) -> bool:
         if not isinstance(suggestion, AdviceSuggestion):
             return False
-        card = SuggestionCard(suggestion)
+        card = SuggestionCard(suggestion, show_feedback=False)
         card.feedback_submitted.connect(self.feedback_submitted.emit)
         self._append_timeline_widget(card)
         return True
@@ -530,7 +548,7 @@ class ChatMainWindow(QMainWindow):
     @Slot()
     def submit_composer(self) -> bool:
         text = self._composer.toPlainText().strip()
-        if not text:
+        if self._active_conversation_id is None or not text:
             return False
         self._composer.clear()
         self.send_requested.emit(text)

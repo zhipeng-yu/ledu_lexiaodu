@@ -6,6 +6,7 @@ from typing import Protocol
 from uuid import uuid4
 
 from PySide6.QtCore import QObject, Signal, Slot
+from PySide6.QtGui import QGuiApplication, QImage
 from PySide6.QtWidgets import QInputDialog, QMessageBox
 
 from lexiaodu.attachments import AttachmentCorrupt, AttachmentStore
@@ -76,6 +77,7 @@ class ChatController(QObject):
         window.send_requested.connect(self.send_message)
         window.retry_requested.connect(self.retry_request)
         window.capture_requested.connect(self.start_capture)
+        window.paste_requested.connect(self.paste_screenshot)
 
         self._refresh_conversations()
         self._ocr_executor.submit(self._preload_ocr)
@@ -326,6 +328,29 @@ class ChatController(QObject):
             self._dispose_selector()
             self._release_capture(request_id)
 
+    @Slot()
+    def paste_screenshot(self) -> None:
+        conversation_id = self._window.active_conversation_id
+        if (
+            conversation_id is None
+            or self._selector is not None
+            or self._editor is not None
+            or self._capture_request_id is not None
+            or self._shutting_down
+        ):
+            return
+        image = QGuiApplication.clipboard().image()
+        if image.isNull():
+            QMessageBox.information(
+                self._window,
+                "粘贴截图",
+                "剪贴板中没有可用图片。",
+            )
+            return
+        request_id = uuid4().hex
+        self._capture_request_id = request_id
+        self._start_image_ocr(conversation_id, request_id, image)
+
     def _cancel_capture(self, request_id: str) -> None:
         if self._capture_request_id != request_id:
             return
@@ -358,17 +383,26 @@ class ChatController(QObject):
         self._dispose_selector()
         try:
             result = self._capture.capture(region)
-            attachment = self._attachments.save_image(
-                conversation_id,
-                result.image,
-            )
+        except Exception:
+            self._release_capture(request_id)
+            return
+        self._start_image_ocr(conversation_id, request_id, result.image)
+
+    def _start_image_ocr(
+        self,
+        conversation_id: str,
+        request_id: str,
+        image: QImage,
+    ) -> None:
+        try:
+            attachment = self._attachments.save_image(conversation_id, image)
         except Exception:
             self._release_capture(request_id)
             return
         try:
             future = self._ocr_executor.submit(
                 self._ocr.recognize,
-                result.image,
+                image,
             )
         except Exception:
             self._release_capture(request_id)

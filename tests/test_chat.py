@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QFrame,
     QLabel,
     QListWidget,
     QPlainTextEdit,
@@ -368,9 +369,13 @@ def test_structured_feedback_emits_reason_without_chat_text() -> None:
     useful = card.findChild(QPushButton, "feedbackUseful")
     reason = card.findChild(QComboBox, "feedbackReason")
     submit = card.findChild(QPushButton, "submitFeedback")
+    feedback = card.findChild(QFrame, "feedbackPanel")
     assert useful is not None
     assert reason is not None
     assert submit is not None
+    assert feedback is not None
+    assert not feedback.isHidden()
+    assert feedback.isEnabled()
 
     QTest.mouseClick(useful, Qt.MouseButton.LeftButton)
     reason.setCurrentIndex(reason.findData(FeedbackReason.CLEAR))
