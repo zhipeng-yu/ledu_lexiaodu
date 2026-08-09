@@ -100,6 +100,19 @@ class ImmediateExecutor(ManualExecutor):
         return future
 
 
+class CancelPendingExecutor(ManualExecutor):
+    def shutdown(
+        self, *, wait: bool = True, cancel_futures: bool = False
+    ) -> None:
+        super().shutdown(wait=wait, cancel_futures=cancel_futures)
+        if not cancel_futures:
+            return
+        pending = list(self.pending)
+        self.pending.clear()
+        for future, _function, _args in pending:
+            future.cancel()
+
+
 class RecordingRepository:
     def __init__(
         self,
@@ -202,6 +215,8 @@ class FakeEditor(QObject):
         self.notice = notice
         self.corrected_text = corrected_text
         self.shown = False
+        self.closed = False
+        self.deleted_later = False
 
     def corrected_transcript(self) -> CorrectedTranscript:
         line = TranscriptLine(Speaker.PARENT, self.corrected_text)
@@ -209,6 +224,12 @@ class FakeEditor(QObject):
 
     def show(self) -> None:
         self.shown = True
+
+    def close(self) -> None:
+        self.closed = True
+
+    def deleteLater(self) -> None:
+        self.deleted_later = True
 
 
 def application() -> QApplication:
@@ -508,3 +529,115 @@ def test_screenshot_uses_capture_start_owner_and_sends_only_corrected_context(
     assert first_messages[1].body == "SCREENSHOT-ANSWER"
     assert repository.list_messages(second.id) == ()
     assert window.active_conversation_id == second.id
+
+
+def test_shutdown_closes_and_deletes_an_open_transcript_editor(
+    tmp_path: Path,
+) -> None:
+    application()
+    repository = repository_at(tmp_path / "chat.sqlite3")
+    conversation = repository.create_conversation("open editor")
+    attachments = AttachmentStore(
+        tmp_path / "attachments",
+        repository,
+        DataCipher(b"c" * 32),
+    )
+    image = QImage(4, 3, QImage.Format.Format_RGB32)
+    capture = FakeCapture(image)
+    ocr = FakeOcr([TranscriptLine(Speaker.PARENT, "OCR")])
+    selector = FakeSelector()
+    editors: list[FakeEditor] = []
+
+    def editor_factory(
+        lines: Sequence[TranscriptLine], notice: str
+    ) -> FakeEditor:
+        editor = FakeEditor(lines, notice, "CORRECTED")
+        editors.append(editor)
+        return editor
+
+    assistant = RecordingAssistant(repository, ["unused"])
+    assistant_executor = ManualExecutor()
+    ocr_executor = ManualExecutor()
+    window = FakeWindow()
+    controller = ChatController(
+        window,
+        repository,
+        attachments,
+        context_builder(repository),
+        assistant,
+        capture,
+        ocr,
+        lambda: selector,
+        editor_factory,
+        assistant_executor,
+        ocr_executor,
+    )
+    ocr_executor.run_next()  # preload
+    window.select(conversation.id)
+    window.capture_requested.emit()
+    selector.region_selected.emit(ScreenRegion(10, 20, 4, 3))
+    ocr_executor.run_next()
+    assert len(editors) == 1
+    assert editors[0].shown
+
+    controller.shutdown()
+
+    assert editors[0].closed
+    assert editors[0].deleted_later
+    assert assistant_executor.shutdown_calls == [(True, True)]
+    assert ocr_executor.shutdown_calls == [(True, True)]
+
+
+def test_shutdown_cancellation_cannot_construct_or_show_an_ocr_editor(
+    tmp_path: Path,
+) -> None:
+    application()
+    repository = repository_at(tmp_path / "chat.sqlite3")
+    conversation = repository.create_conversation("pending OCR")
+    attachments = AttachmentStore(
+        tmp_path / "attachments",
+        repository,
+        DataCipher(b"c" * 32),
+    )
+    image = QImage(4, 3, QImage.Format.Format_RGB32)
+    capture = FakeCapture(image)
+    ocr = FakeOcr([TranscriptLine(Speaker.PARENT, "MUST-NOT-RUN")])
+    selector = FakeSelector()
+    editors: list[FakeEditor] = []
+
+    def editor_factory(
+        lines: Sequence[TranscriptLine], notice: str
+    ) -> FakeEditor:
+        editor = FakeEditor(lines, notice, "MUST-NOT-SHOW")
+        editors.append(editor)
+        return editor
+
+    ocr_executor = CancelPendingExecutor()
+    window = FakeWindow()
+    controller = ChatController(
+        window,
+        repository,
+        attachments,
+        context_builder(repository),
+        RecordingAssistant(repository, ["unused"]),
+        capture,
+        ocr,
+        lambda: selector,
+        editor_factory,
+        ManualExecutor(),
+        ocr_executor,
+    )
+    ocr_executor.run_next()  # preload
+    window.select(conversation.id)
+    window.capture_requested.emit()
+    selector.region_selected.emit(ScreenRegion(10, 20, 4, 3))
+    assert len(ocr_executor.pending) == 1
+    pending_ocr = ocr_executor.pending[0][0]
+    shown_before_shutdown = list(window.shown)
+
+    controller.shutdown()
+
+    assert pending_ocr.cancelled()
+    assert ocr.images == []
+    assert editors == []
+    assert window.shown == shown_before_shutdown

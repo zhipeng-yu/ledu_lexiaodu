@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from concurrent.futures import Executor, Future
+from concurrent.futures import CancelledError, Executor, Future
 from typing import Protocol
 from uuid import uuid4
 
@@ -205,7 +205,10 @@ class ChatController(QObject):
         self._show_if_active(conversation_id)
 
     def _show_if_active(self, conversation_id: str) -> None:
-        if self._window.active_conversation_id == conversation_id:
+        if (
+            not self._shutting_down
+            and self._window.active_conversation_id == conversation_id
+        ):
             self.show_conversation(conversation_id)
 
     @Slot()
@@ -250,6 +253,8 @@ class ChatController(QObject):
         request_id: str,
         region: ScreenRegion,
     ) -> None:
+        if self._shutting_down:
+            return
         self._dispose_selector()
         result = self._capture.capture(region)
         attachment = self._attachments.save_image(
@@ -277,10 +282,14 @@ class ChatController(QObject):
         self,
         result: tuple[str, str, str, Future[list[TranscriptLine]]],
     ) -> None:
+        if self._shutting_down:
+            return
         conversation_id, request_id, attachment_id, future = result
         try:
             lines = future.result()
             notice = "请核对 OCR 文字和发言人。"
+        except CancelledError:
+            return
         except OcrError as exc:
             lines = []
             notice = f"{exc}。请在下方手动粘贴文字。"
@@ -309,8 +318,10 @@ class ChatController(QObject):
         attachment_id: str,
         editor: TranscriptEditor,
     ) -> None:
+        if self._shutting_down:
+            return
         corrected_text = editor.corrected_transcript().text.strip()
-        if not corrected_text or self._shutting_down:
+        if not corrected_text:
             return
         self._attachments.save_corrected_text(
             conversation_id,
@@ -330,11 +341,24 @@ class ChatController(QObject):
         except OcrError:
             pass
 
+    def _dispose_editor(self) -> None:
+        if self._editor is None:
+            return
+        editor = self._editor
+        self._editor = None
+        try:
+            editor.close()
+            editor.deleteLater()
+        except RuntimeError:
+            # WA_DeleteOnClose may already have deleted an accepted editor.
+            pass
+
     @Slot()
     def shutdown(self) -> None:
         if self._shutting_down:
             return
         self._shutting_down = True
         self._dispose_selector()
+        self._dispose_editor()
         self._assistant_executor.shutdown(wait=True, cancel_futures=True)
         self._ocr_executor.shutdown(wait=True, cancel_futures=True)
