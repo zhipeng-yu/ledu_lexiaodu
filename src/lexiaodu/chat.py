@@ -33,6 +33,115 @@ from lexiaodu.feedback import (
 from lexiaodu.font_scaling import scaled_point_size
 
 
+_SUGGESTION_CARD_STYLE_TEMPLATE = """
+    QWidget#suggestionTurn {
+        background: #f7f8f4;
+        border-bottom: 1px solid #dfe3da;
+    }
+    QLabel#turnRole {
+        color: #202123;
+        font-weight: 600;
+    }
+    QLabel#sectionTitle {
+        color: #596152;
+        font-size: 12px;
+        font-weight: 600;
+        margin-top: 4px;
+    }
+    QLabel#concernSummary {
+        color: #272c25;
+        font-size: 14px;
+    }
+    QLabel#riskBadge,
+    QLabel#highRiskBadge {
+        border-radius: 9px;
+        padding: 3px 8px;
+        font-size: 12px;
+        font-weight: 600;
+    }
+    QLabel#riskBadge {
+        color: #2f5f45;
+        background: #e3efe7;
+    }
+    QLabel#highRiskBadge {
+        color: #8c2f2f;
+        background: #f9dddd;
+    }
+    QPlainTextEdit#wechatReply {
+        background: #ffffff;
+        border: 1px solid #cdd3c8;
+        border-radius: 7px;
+        padding: 8px;
+        selection-background-color: #c6d9b9;
+    }
+    QFrame#factEvidenceCard {
+        background: #ffffff;
+        border-left: 3px solid #6f8a5e;
+        border-radius: 3px;
+    }
+    QLabel#factSource {
+        color: #53634b;
+        font-weight: 600;
+    }
+    QLabel#factEvidence,
+    QLabel#missingEvidence {
+        color: #50564d;
+    }
+    QLabel#riskWarning {
+        color: #6b5a2c;
+        background: #fff7dc;
+        border-radius: 5px;
+        padding: 8px;
+    }
+    QLabel#highRiskWarning {
+        color: #842b2b;
+        background: #fff0f0;
+        border-left: 3px solid #c04a4a;
+        padding: 8px;
+    }
+    QLabel#transferStatus {
+        color: #343a31;
+        font-weight: 600;
+    }
+    QLabel#copyStatus,
+    QLabel#feedbackStatus {
+        color: #47704f;
+    }
+    QPushButton#copyReply {
+        color: white;
+        background: #315d43;
+        border: 0;
+        border-radius: 6px;
+        padding: 7px 16px;
+    }
+    QPushButton#copyReply:hover { background: #3d7151; }
+    QPushButton#copyReply:disabled {
+        color: #999f9b;
+        background: #e0e3e1;
+    }
+    QFrame#feedbackPanel {
+        background: #edf0ea;
+        border-radius: 7px;
+    }
+    QPushButton#feedbackUseful:checked,
+    QPushButton#feedbackUnhelpful:checked {
+        color: white;
+        background: #5f7355;
+    }
+"""
+
+
+def _scaled_style_sheet(template: str) -> str:
+    replacements = {
+        "font-size: 18px;": f"font-size: {scaled_point_size(14.0):g}pt;",
+        "font-size: 14px;": f"font-size: {scaled_point_size(11.0):g}pt;",
+        "font-size: 12px;": f"font-size: {scaled_point_size(9.0):g}pt;",
+    }
+    for existing, scaled in replacements.items():
+        template = template.replace(existing, scaled)
+    return template
+
+
 class ChatRole(StrEnum):
     QUESTION = "家长问题"
     ASSISTANT = "AI"
@@ -291,6 +400,17 @@ class SuggestionCard(QWidget):
 
         row_layout.addWidget(content, 8)
         row_layout.addStretch(1)
+        self._apply_style_sheet()
+
+    def _apply_style_sheet(self) -> None:
+        self.setStyleSheet(
+            _scaled_style_sheet(_SUGGESTION_CARD_STYLE_TEMPLATE)
+        )
+
+    def event(self, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.ApplicationFontChange:
+            self._apply_style_sheet()
+        return super().event(event)
 
     @staticmethod
     def _section_title(text: str) -> QLabel:
@@ -453,10 +573,6 @@ class AiChatDialog(QDialog):
                 background: #f7f7f8;
                 border-bottom: 1px solid #e5e5e7;
             }
-            QWidget#suggestionTurn {
-                background: #f7f8f4;
-                border-bottom: 1px solid #dfe3da;
-            }
             QLabel#turnRole {
                 color: #202123;
                 font-weight: 600;
@@ -464,92 +580,6 @@ class AiChatDialog(QDialog):
             QLabel#turnBody {
                 color: #2d3139;
                 font-size: 14px;
-            }
-            QLabel#sectionTitle {
-                color: #596152;
-                font-size: 12px;
-                font-weight: 600;
-                margin-top: 4px;
-            }
-            QLabel#concernSummary {
-                color: #272c25;
-                font-size: 14px;
-            }
-            QLabel#riskBadge,
-            QLabel#highRiskBadge {
-                border-radius: 9px;
-                padding: 3px 8px;
-                font-size: 12px;
-                font-weight: 600;
-            }
-            QLabel#riskBadge {
-                color: #2f5f45;
-                background: #e3efe7;
-            }
-            QLabel#highRiskBadge {
-                color: #8c2f2f;
-                background: #f9dddd;
-            }
-            QPlainTextEdit#wechatReply {
-                background: #ffffff;
-                border: 1px solid #cdd3c8;
-                border-radius: 7px;
-                padding: 8px;
-                selection-background-color: #c6d9b9;
-            }
-            QFrame#factEvidenceCard {
-                background: #ffffff;
-                border-left: 3px solid #6f8a5e;
-                border-radius: 3px;
-            }
-            QLabel#factSource {
-                color: #53634b;
-                font-weight: 600;
-            }
-            QLabel#factEvidence,
-            QLabel#missingEvidence {
-                color: #50564d;
-            }
-            QLabel#riskWarning {
-                color: #6b5a2c;
-                background: #fff7dc;
-                border-radius: 5px;
-                padding: 8px;
-            }
-            QLabel#highRiskWarning {
-                color: #842b2b;
-                background: #fff0f0;
-                border-left: 3px solid #c04a4a;
-                padding: 8px;
-            }
-            QLabel#transferStatus {
-                color: #343a31;
-                font-weight: 600;
-            }
-            QLabel#copyStatus,
-            QLabel#feedbackStatus {
-                color: #47704f;
-            }
-            QPushButton#copyReply {
-                color: white;
-                background: #315d43;
-                border: 0;
-                border-radius: 6px;
-                padding: 7px 16px;
-            }
-            QPushButton#copyReply:hover { background: #3d7151; }
-            QPushButton#copyReply:disabled {
-                color: #999f9b;
-                background: #e0e3e1;
-            }
-            QFrame#feedbackPanel {
-                background: #edf0ea;
-                border-radius: 7px;
-            }
-            QPushButton#feedbackUseful:checked,
-            QPushButton#feedbackUnhelpful:checked {
-                color: white;
-                background: #5f7355;
             }
             QFrame#chatComposer {
                 background: #ffffff;
@@ -576,21 +606,7 @@ class AiChatDialog(QDialog):
         self._apply_style_sheet()
 
     def _apply_style_sheet(self) -> None:
-        style_sheet = self._style_template
-        replacements = {
-            "font-size: 18px;": (
-                f"font-size: {scaled_point_size(14.0):g}pt;"
-            ),
-            "font-size: 14px;": (
-                f"font-size: {scaled_point_size(11.0):g}pt;"
-            ),
-            "font-size: 12px;": (
-                f"font-size: {scaled_point_size(9.0):g}pt;"
-            ),
-        }
-        for existing, scaled in replacements.items():
-            style_sheet = style_sheet.replace(existing, scaled)
-        self.setStyleSheet(style_sheet)
+        self.setStyleSheet(_scaled_style_sheet(self._style_template))
 
     def event(self, event: QEvent) -> bool:
         if (

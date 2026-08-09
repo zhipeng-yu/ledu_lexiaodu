@@ -4,7 +4,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont, QGuiApplication, QInputMethodEvent
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QGuiApplication,
+    QInputMethodEvent,
+    QPalette,
+)
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
@@ -59,6 +65,30 @@ def _suggestion(level: RiskLevel) -> AdviceSuggestion:
 
 def test_public_suggestion_card_keeps_legacy_alias() -> None:
     assert _SuggestionCard is SuggestionCard
+
+
+def test_suggestion_card_keeps_component_styles_outside_legacy_dialog() -> None:
+    application = QApplication.instance() or QApplication([])
+    card = SuggestionCard(_suggestion(RiskLevel.LOW))
+    card.show()
+    application.processEvents()
+
+    badge = card.findChild(QLabel, "riskBadge")
+    warning = card.findChild(QLabel, "riskWarning")
+    copy_button = card.findChild(QPushButton, "copyReply")
+    assert badge is not None
+    assert warning is not None
+    assert copy_button is not None
+    assert badge.palette().color(QPalette.ColorRole.WindowText) == QColor(
+        "#2f5f45"
+    )
+    assert warning.palette().color(QPalette.ColorRole.WindowText) == QColor(
+        "#6b5a2c"
+    )
+    assert copy_button.palette().color(
+        QPalette.ColorRole.ButtonText
+    ) == QColor("#ffffff")
+    card.close()
 
 
 def test_chat_explicit_font_roles_follow_global_scaling() -> None:

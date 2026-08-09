@@ -475,6 +475,7 @@ class ChatMainWindow(QMainWindow):
     ) -> None:
         blocker = QSignalBlocker(self._conversations)
         self._conversations.clear()
+        self._active_conversation_id = None
         for conversation in conversations:
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, conversation.id)
@@ -547,23 +548,30 @@ class ChatMainWindow(QMainWindow):
             self.conversation_selected.emit(conversation_id)
 
     def _request_rename(self) -> None:
-        if self._active_conversation_id:
-            self.rename_conversation_requested.emit(
-                self._active_conversation_id
-            )
+        conversation_id = self._selected_conversation_id()
+        if conversation_id:
+            self.rename_conversation_requested.emit(conversation_id)
 
     def _request_delete(self) -> None:
-        if self._active_conversation_id:
-            self.delete_conversation_requested.emit(
-                self._active_conversation_id
-            )
+        conversation_id = self._selected_conversation_id()
+        if conversation_id:
+            self.delete_conversation_requested.emit(conversation_id)
 
     def _request_generate_reply(self) -> None:
-        if self._active_conversation_id:
-            self.generate_reply_requested.emit(
-                self._active_conversation_id
-            )
+        conversation_id = self._selected_conversation_id()
+        if conversation_id:
+            self.generate_reply_requested.emit(conversation_id)
 
     def _request_open_drawer(self) -> None:
-        if self._active_conversation_id:
-            self.open_drawer_requested.emit(self._active_conversation_id)
+        conversation_id = self._selected_conversation_id()
+        if conversation_id:
+            self.open_drawer_requested.emit(conversation_id)
+
+    def _selected_conversation_id(self) -> str | None:
+        item = self._conversations.currentItem()
+        if item is None:
+            return None
+        conversation_id = item.data(Qt.ItemDataRole.UserRole)
+        if isinstance(conversation_id, str) and conversation_id:
+            return conversation_id
+        return None

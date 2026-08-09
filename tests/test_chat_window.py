@@ -223,6 +223,40 @@ def test_workspace_actions_emit_the_selected_id_and_search_text() -> None:
     window.close()
 
 
+def test_replacing_sidebar_cannot_emit_actions_for_a_stale_conversation() -> None:
+    application = _application()
+    window = ChatMainWindow()
+    sidebar = window.findChild(QListWidget, "conversationSidebar")
+    renamed: list[str] = []
+    deleted: list[str] = []
+    window.rename_conversation_requested.connect(renamed.append)
+    window.delete_conversation_requested.connect(deleted.append)
+    assert sidebar is not None
+
+    window.set_conversations((ChatConversationView("a", "会话 A"),))
+    sidebar.setCurrentRow(0)
+    assert window.active_conversation_id == "a"
+
+    window.set_conversations((ChatConversationView("b", "会话 B"),))
+    assert sidebar.currentItem() is None
+    for object_name in ("renameConversation", "deleteConversation"):
+        button = window.findChild(QPushButton, object_name)
+        assert button is not None
+        QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+    assert renamed == []
+    assert deleted == []
+
+    sidebar.setCurrentRow(0)
+    for object_name in ("renameConversation", "deleteConversation"):
+        button = window.findChild(QPushButton, object_name)
+        assert button is not None
+        QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+    assert renamed == ["b"]
+    assert deleted == ["b"]
+    assert application is not None
+    window.close()
+
+
 def test_formal_reply_card_appears_only_when_explicitly_appended() -> None:
     application = _application()
     window = ChatMainWindow()
