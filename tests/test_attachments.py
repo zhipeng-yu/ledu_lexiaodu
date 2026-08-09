@@ -68,11 +68,16 @@ def test_encrypted_image_lifecycle_is_conversation_scoped_and_restart_safe(
     assert loaded.pixelColor(1, 1) == QColor(12, 34, 56)
     assert reopened_store.list_for_conversation(first.id) == (attachment,)
 
+    second_attachment = reopened_store.save_image(second.id, sample_image())
     reopened_repository.delete_conversation(first.id)
+    reopened_repository.delete_conversation(second.id)
 
-    assert reopened_store.run_cleanup_jobs() == 1
-    assert reopened_store.run_cleanup_jobs() == 0
+    assert reopened_store.run_cleanup_jobs(first.id) == 1
+    assert reopened_store.run_cleanup_jobs(first.id) == 0
     assert not encrypted_file.exists()
+    assert second_attachment.encrypted_path.exists()
+    assert reopened_store.run_cleanup_jobs(second.id) == 1
+    assert not second_attachment.encrypted_path.exists()
 
 
 def test_each_attachment_uses_an_independent_random_data_key(

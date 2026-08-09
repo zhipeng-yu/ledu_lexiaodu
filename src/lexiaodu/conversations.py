@@ -634,15 +634,17 @@ class ConversationRepository:
             row = self._attachment_row(connection, conversation_id, attachment_id)
         return self._attachment_from_row(row)
 
-    def list_cleanup_jobs(self, kind: str) -> tuple[CleanupJob, ...]:
+    def list_cleanup_jobs(
+        self, conversation_id: str, kind: str
+    ) -> tuple[CleanupJob, ...]:
         with self._connect() as connection:
             rows = connection.execute(
                 """
                 SELECT * FROM cleanup_jobs
-                WHERE kind = ? AND status = 'pending'
+                WHERE conversation_id = ? AND kind = ? AND status = 'pending'
                 ORDER BY created_at, id
                 """,
-                (kind,),
+                (conversation_id, kind),
             ).fetchall()
         return tuple(
             CleanupJob(
@@ -655,18 +657,28 @@ class ConversationRepository:
             for row in rows
         )
 
-    def complete_cleanup_job(self, job_id: str) -> None:
+    def complete_cleanup_job(self, conversation_id: str, job_id: str) -> None:
         now = self._now()
         with self._connect() as connection:
             self._begin_write(connection)
-            connection.execute(
+            updated = connection.execute(
                 """
                 UPDATE cleanup_jobs
                 SET status = 'completed', completed_at = ?
-                WHERE id = ? AND status = 'pending'
+                WHERE id = ? AND conversation_id = ? AND status = 'pending'
                 """,
-                (self._format_time(now), job_id),
+                (self._format_time(now), job_id, conversation_id),
             )
+            if updated.rowcount == 0:
+                row = connection.execute(
+                    """
+                    SELECT 1 FROM cleanup_jobs
+                    WHERE id = ? AND conversation_id = ?
+                    """,
+                    (job_id, conversation_id),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(job_id)
 
     def delete_conversation(self, conversation_id: str) -> None:
         now = self._now()

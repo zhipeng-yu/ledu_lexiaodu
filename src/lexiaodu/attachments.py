@@ -17,6 +17,7 @@ from lexiaodu.local_crypto import DataCipher
 _FORMAT_VERSION = b"\x01"
 _NONCE_BYTES = 12
 _DATA_KEY_BYTES = 32
+_CORRUPT_MESSAGE = "附件无法解码"
 
 
 class AttachmentCorrupt(ValueError):
@@ -32,13 +33,13 @@ def encrypt_attachment_payload(data_key: bytes, raw: bytes) -> bytes:
 
 def decrypt_attachment_payload(data_key: bytes, payload: bytes) -> bytes:
     if len(payload) < 14 or payload[:1] != _FORMAT_VERSION:
-        raise AttachmentCorrupt("闄勪欢鏃犳硶瑙ｇ爜")
+        raise AttachmentCorrupt(_CORRUPT_MESSAGE)
     try:
         return AESGCM(data_key).decrypt(
             payload[1:13], payload[13:], _FORMAT_VERSION
         )
     except (InvalidTag, ValueError) as exc:
-        raise AttachmentCorrupt("闄勪欢鏃犳硶瑙ｇ爜") from exc
+        raise AttachmentCorrupt(_CORRUPT_MESSAGE) from exc
 
 
 class AttachmentStore:
@@ -80,7 +81,7 @@ class AttachmentStore:
         raw = decrypt_attachment_payload(data_key, payload)
         image = QImage.fromData(raw, "PNG")
         if image.isNull():
-            raise AttachmentCorrupt("闄勪欢鏃犳硶瑙ｇ爜")
+            raise AttachmentCorrupt(_CORRUPT_MESSAGE)
         return image
 
     def save_corrected_text(
@@ -98,15 +99,17 @@ class AttachmentStore:
     ) -> tuple[Attachment, ...]:
         return self._repository.list_attachments(conversation_id)
 
-    def run_cleanup_jobs(self) -> int:
+    def run_cleanup_jobs(self, conversation_id: str) -> int:
         completed = 0
         root = self._root.resolve()
-        for job in self._repository.list_cleanup_jobs("delete_attachment"):
+        for job in self._repository.list_cleanup_jobs(
+            conversation_id, "delete_attachment"
+        ):
             encrypted_path = Path(job.payload).resolve()
             if encrypted_path.parent != root:
-                raise AttachmentCorrupt("闄勪欢鏃犳硶瑙ｇ爜")
+                raise AttachmentCorrupt(_CORRUPT_MESSAGE)
             encrypted_path.unlink(missing_ok=True)
-            self._repository.complete_cleanup_job(job.id)
+            self._repository.complete_cleanup_job(conversation_id, job.id)
             completed += 1
         return completed
 
@@ -114,10 +117,10 @@ class AttachmentStore:
     def _png_bytes(image: QImage) -> bytes:
         buffer = QBuffer()
         if not buffer.open(QIODevice.OpenModeFlag.WriteOnly):
-            raise AttachmentCorrupt("闄勪欢鏃犳硶瑙ｇ爜")
+            raise AttachmentCorrupt(_CORRUPT_MESSAGE)
         try:
             if image.isNull() or not image.save(buffer, "PNG"):
-                raise AttachmentCorrupt("闄勪欢鏃犳硶瑙ｇ爜")
+                raise AttachmentCorrupt(_CORRUPT_MESSAGE)
             return bytes(buffer.data())
         finally:
             buffer.close()

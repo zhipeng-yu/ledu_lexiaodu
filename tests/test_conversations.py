@@ -527,28 +527,43 @@ def test_attachment_metadata_and_corrected_text_are_conversation_scoped_and_encr
     assert b"CORRECTED-OCR-UNIQUE-SENTINEL" not in raw
 
 
-def test_conversation_deletion_queues_attachment_cleanup_until_completed(
+def test_attachment_cleanup_jobs_are_conversation_scoped_and_completion_is_idempotent(
     repository, tmp_path
 ) -> None:
-    conversation = repository.create_conversation("delete attachments")
-    encrypted_path = tmp_path / "attachment.bin"
-    attachment = repository.save_attachment(
-        conversation.id,
+    first = repository.create_conversation("delete first attachments")
+    second = repository.create_conversation("delete second attachments")
+    first_path = tmp_path / "first-attachment.bin"
+    second_path = tmp_path / "second-attachment.bin"
+    first_attachment = repository.save_attachment(
+        first.id,
         "b" * 32,
-        encrypted_path,
+        first_path,
         b"encrypted-data-key",
     )
+    repository.save_attachment(
+        second.id,
+        "c" * 32,
+        second_path,
+        b"another-encrypted-data-key",
+    )
 
-    repository.delete_conversation(conversation.id)
+    repository.delete_conversation(first.id)
+    repository.delete_conversation(second.id)
 
-    jobs = repository.list_cleanup_jobs("delete_attachment")
-    assert len(jobs) == 1
-    assert jobs[0].conversation_id == conversation.id
-    assert jobs[0].payload == str(encrypted_path)
+    first_jobs = repository.list_cleanup_jobs(first.id, "delete_attachment")
+    second_jobs = repository.list_cleanup_jobs(second.id, "delete_attachment")
+    assert len(first_jobs) == len(second_jobs) == 1
+    assert first_jobs[0].conversation_id == first.id
+    assert first_jobs[0].payload == str(first_path)
+    assert second_jobs[0].conversation_id == second.id
+    assert second_jobs[0].payload == str(second_path)
     with pytest.raises(KeyError):
-        repository.get_attachment(conversation.id, attachment.id)
+        repository.get_attachment(first.id, first_attachment.id)
+    with pytest.raises(KeyError):
+        repository.complete_cleanup_job(first.id, second_jobs[0].id)
 
-    repository.complete_cleanup_job(jobs[0].id)
-    repository.complete_cleanup_job(jobs[0].id)
+    repository.complete_cleanup_job(first.id, first_jobs[0].id)
+    repository.complete_cleanup_job(first.id, first_jobs[0].id)
 
-    assert repository.list_cleanup_jobs("delete_attachment") == ()
+    assert repository.list_cleanup_jobs(first.id, "delete_attachment") == ()
+    assert repository.list_cleanup_jobs(second.id, "delete_attachment") == second_jobs
