@@ -17,7 +17,13 @@ from PySide6.QtWidgets import (
 )
 
 from lexiaodu.advice import AdviceSuggestion
-from lexiaodu.chat import AiChatDialog, ChatMessage, ChatRole
+from lexiaodu.chat import (
+    AiChatDialog,
+    ChatMessage,
+    ChatRole,
+    SuggestionCard,
+    _SuggestionCard,
+)
 from lexiaodu.feedback import FeedbackReason, FeedbackSubmission
 from lexiaodu.font_scaling import ApplicationFontScaler
 from lexiaodu.knowledge import KnowledgeType, SearchResult
@@ -49,6 +55,10 @@ def _suggestion(level: RiskLevel) -> AdviceSuggestion:
             ),
         ),
     )
+
+
+def test_public_suggestion_card_keeps_legacy_alias() -> None:
+    assert _SuggestionCard is SuggestionCard
 
 
 def test_chat_explicit_font_roles_follow_global_scaling() -> None:

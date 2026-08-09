@@ -128,7 +128,7 @@ class _ConversationTurn(QWidget):
         row_layout.addStretch(1)
 
 
-class _SuggestionCard(QWidget):
+class SuggestionCard(QWidget):
     feedback_submitted = Signal(object)
 
     def __init__(self, suggestion: AdviceSuggestion) -> None:
@@ -343,6 +343,9 @@ class _SuggestionCard(QWidget):
             widget.setEnabled(False)
         self._feedback_status.setText("已记录")
         return True
+
+
+_SuggestionCard = SuggestionCard
 
 
 class AiChatDialog(QDialog):
@@ -658,7 +661,7 @@ class AiChatDialog(QDialog):
         self._messages.append(
             ChatMessage(ChatRole.ASSISTANT, suggestion.wechat_reply)
         )
-        card = _SuggestionCard(suggestion)
+        card = SuggestionCard(suggestion)
         card.feedback_submitted.connect(self.feedback_submitted.emit)
         self._append_turn_widget(card)
         self._status.setText("后续建议已生成，可编辑、核对并复制。")
