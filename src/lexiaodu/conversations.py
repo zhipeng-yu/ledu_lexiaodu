@@ -9,7 +9,10 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from lexiaodu.advice import AdviceSuggestion
+from lexiaodu.knowledge import KnowledgeType, SearchResult
 from lexiaodu.local_crypto import DataCipher
+from lexiaodu.risk import RiskAssessment, RiskLevel, TransferStatus
 
 
 def utc_now() -> datetime:
@@ -123,6 +126,14 @@ class CleanupJob:
     created_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class ReplyCard:
+    id: str
+    conversation_id: str
+    suggestion: AdviceSuggestion
+    created_at: datetime
+
+
 class ConversationRepository:
     def __init__(
         self,
@@ -224,6 +235,14 @@ class ConversationRepository:
                 );
                 CREATE INDEX IF NOT EXISTS cleanup_jobs_by_conversation
                     ON cleanup_jobs(conversation_id, status, created_at, id);
+                CREATE TABLE IF NOT EXISTS reply_cards (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL REFERENCES conversations(id),
+                    encrypted_payload BLOB NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS reply_cards_by_conversation
+                    ON reply_cards(conversation_id, created_at, id);
                 """
             )
             self._ensure_message_columns(connection)
@@ -807,6 +826,52 @@ class ConversationRepository:
             row = self._attachment_row(connection, conversation_id, attachment_id)
         return self._attachment_from_row(row)
 
+    def save_reply_card(
+        self,
+        conversation_id: str,
+        suggestion: AdviceSuggestion,
+    ) -> ReplyCard:
+        now = self._now()
+        payload = self._serialize_reply_card(suggestion)
+        with self._connect() as connection:
+            self._begin_write(connection)
+            self._active_conversation_row(connection, conversation_id)
+            connection.execute(
+                """
+                INSERT INTO reply_cards(
+                    id, conversation_id, encrypted_payload, created_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    suggestion.suggestion_id,
+                    conversation_id,
+                    self._encrypt_text(payload),
+                    self._format_time(now),
+                ),
+            )
+        return ReplyCard(
+            suggestion.suggestion_id,
+            conversation_id,
+            suggestion,
+            now,
+        )
+
+    def list_reply_cards(
+        self,
+        conversation_id: str,
+    ) -> tuple[ReplyCard, ...]:
+        with self._connect() as connection:
+            self._active_conversation_row(connection, conversation_id)
+            rows = connection.execute(
+                """
+                SELECT * FROM reply_cards
+                WHERE conversation_id = ?
+                ORDER BY created_at, id
+                """,
+                (conversation_id,),
+            ).fetchall()
+        return tuple(self._reply_card_from_row(row) for row in rows)
+
     def list_cleanup_jobs(
         self, conversation_id: str, kind: str
     ) -> tuple[CleanupJob, ...]:
@@ -872,6 +937,7 @@ class ConversationRepository:
                 "attachment_texts",
                 "document_usages",
                 "generations",
+                "reply_cards",
                 "attachments",
                 "context_summaries",
                 "confirmed_facts",
@@ -1295,6 +1361,67 @@ class ConversationRepository:
                 else None
             ),
             created_at=self._parse_time(row["created_at"]),
+        )
+
+    def _reply_card_from_row(self, row: sqlite3.Row) -> ReplyCard:
+        payload = json.loads(self._decrypt_text(row["encrypted_payload"]))
+        suggestion = AdviceSuggestion(
+            suggestion_id=row["id"],
+            concern_summary=payload["concern_summary"],
+            wechat_reply=payload["wechat_reply"],
+            facts=tuple(
+                SearchResult(
+                    knowledge_type=KnowledgeType(fact["knowledge_type"]),
+                    document_name=fact["document_name"],
+                    locator=fact["locator"],
+                    evidence=fact["evidence"],
+                    score=float(fact["score"]),
+                    source_tier=fact["source_tier"],
+                    authority=fact["authority"],
+                )
+                for fact in payload["facts"]
+            ),
+            risk=RiskAssessment(
+                level=RiskLevel(payload["risk"]["level"]),
+                warnings=tuple(payload["risk"]["warnings"]),
+                transfer_status=TransferStatus(
+                    payload["risk"]["transfer_status"]
+                ),
+            ),
+        )
+        return ReplyCard(
+            id=row["id"],
+            conversation_id=row["conversation_id"],
+            suggestion=suggestion,
+            created_at=self._parse_time(row["created_at"]),
+        )
+
+    @staticmethod
+    def _serialize_reply_card(suggestion: AdviceSuggestion) -> str:
+        return json.dumps(
+            {
+                "concern_summary": suggestion.concern_summary,
+                "wechat_reply": suggestion.wechat_reply,
+                "facts": [
+                    {
+                        "knowledge_type": fact.knowledge_type.value,
+                        "document_name": fact.document_name,
+                        "locator": fact.locator,
+                        "evidence": fact.evidence,
+                        "score": fact.score,
+                        "source_tier": fact.source_tier,
+                        "authority": fact.authority,
+                    }
+                    for fact in suggestion.facts
+                ],
+                "risk": {
+                    "level": suggestion.risk.level.value,
+                    "warnings": list(suggestion.risk.warnings),
+                    "transfer_status": suggestion.risk.transfer_status.value,
+                },
+            },
+            ensure_ascii=False,
+            sort_keys=True,
         )
 
     def _encrypt_text(self, value: str) -> bytes:

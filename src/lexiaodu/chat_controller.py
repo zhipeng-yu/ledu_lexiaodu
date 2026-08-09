@@ -6,6 +6,7 @@ from typing import Protocol
 from uuid import uuid4
 
 from PySide6.QtCore import QObject, Signal, Slot
+from PySide6.QtWidgets import QInputDialog, QMessageBox
 
 from lexiaodu.attachments import AttachmentStore
 from lexiaodu.capture import ScreenCapture
@@ -67,7 +68,11 @@ class ChatController(QObject):
 
         self._assistant_completed.connect(self._handle_assistant_completion)
         self._ocr_completed.connect(self._handle_ocr_completion)
+        window.create_conversation_requested.connect(self.create_conversation)
         window.conversation_selected.connect(self.show_conversation)
+        window.rename_conversation_requested.connect(self.rename_conversation)
+        window.delete_conversation_requested.connect(self.delete_conversation)
+        window.search_requested.connect(self.search_conversations)
         window.send_requested.connect(self.send_message)
         window.retry_requested.connect(self.retry_request)
         window.capture_requested.connect(self.start_capture)
@@ -75,11 +80,76 @@ class ChatController(QObject):
         self._refresh_conversations()
         self._ocr_executor.submit(self._preload_ocr)
 
-    def _refresh_conversations(self) -> None:
+    def _refresh_conversations(
+        self,
+        *,
+        selected_id: str | None = None,
+    ) -> None:
         self._window.set_conversations(
             tuple(
                 ChatConversationView(conversation.id, conversation.title)
                 for conversation in self._repository.list_conversations()
+            )
+        )
+        if selected_id is not None:
+            self._window.select_conversation(selected_id)
+
+    @Slot()
+    def create_conversation(self) -> None:
+        if self._shutting_down:
+            return
+        conversation = self._repository.create_conversation("新会话")
+        self._refresh_conversations(selected_id=conversation.id)
+
+    @Slot(str)
+    def rename_conversation(self, conversation_id: str) -> None:
+        if self._shutting_down:
+            return
+        try:
+            conversation = self._repository.get_conversation(conversation_id)
+        except KeyError:
+            self._refresh_conversations()
+            return
+        title, accepted = QInputDialog.getText(
+            self._window,
+            "重命名会话",
+            "会话名称",
+            text=conversation.title,
+        )
+        title = title.strip()
+        if not accepted or not title:
+            return
+        self._repository.rename_conversation(conversation_id, title)
+        self._refresh_conversations(selected_id=conversation_id)
+
+    @Slot(str)
+    def delete_conversation(self, conversation_id: str) -> None:
+        if self._shutting_down:
+            return
+        answer = QMessageBox.question(
+            self._window,
+            "删除会话",
+            "确认删除这个会话及其本地附件吗？",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self._repository.delete_conversation(conversation_id)
+        self._attachments.run_cleanup_jobs(conversation_id)
+        self._refresh_conversations()
+
+    @Slot(str)
+    def search_conversations(self, query: str) -> None:
+        if self._shutting_down:
+            return
+        conversations = (
+            self._repository.search_conversations(query)
+            if query.strip()
+            else self._repository.list_conversations()
+        )
+        self._window.set_conversations(
+            tuple(
+                ChatConversationView(conversation.id, conversation.title)
+                for conversation in conversations
             )
         )
 
@@ -90,6 +160,8 @@ class ChatController(QObject):
             conversation_id,
             tuple(self._turn_view(message) for message in messages),
         )
+        for reply_card in self._repository.list_reply_cards(conversation_id):
+            self._window.append_suggestion(reply_card.suggestion)
 
     @staticmethod
     def _turn_view(message: Message) -> ChatTurnView:

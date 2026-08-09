@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
@@ -11,9 +13,15 @@ from openai import OpenAI
 from PySide6.QtWidgets import QApplication
 
 from lexiaodu.advice import AdviceService
+from lexiaodu.attachments import AttachmentStore
 from lexiaodu.capture import CaptureError, CaptureResult, QtScreenCapture, screen_bounds
+from lexiaodu.chat_controller import ChatController, ConversationAssistant
+from lexiaodu.chat_window import ChatMainWindow
 from lexiaodu.config import AppSettings, SettingsError, load_settings
+from lexiaodu.context import ContextBuilder, ContextPackage
+from lexiaodu.conversations import ConversationRepository
 from lexiaodu.domain import centered_region
+from lexiaodu.editor import TranscriptEditor
 from lexiaodu.feedback import FeedbackStore
 from lexiaodu.font_scaling import ApplicationFontScaler
 from lexiaodu.generator import (
@@ -35,10 +43,38 @@ from lexiaodu.knowledge_import import (
     format_policy_report,
     format_semantic_report,
 )
+from lexiaodu.local_crypto import DataCipher
 from lexiaodu.ocr import PaddleOcrEngine
 from lexiaodu.risk import DeterministicRiskRules
+from lexiaodu.selection import SelectionOverlay
 from lexiaodu.toolbar import FloatingToolbar
 from lexiaodu.workflow import CaptureController
+
+
+@dataclass(slots=True)
+class ChatRuntime:
+    window: ChatMainWindow
+    controller: ChatController
+    repository: ConversationRepository
+    attachments: AttachmentStore
+    context_builder: ContextBuilder
+    assistant_executor: ThreadPoolExecutor
+    ocr_executor: ThreadPoolExecutor
+
+
+@dataclass(slots=True)
+class LegacyRuntime:
+    toolbar: FloatingToolbar
+    controller: CaptureController
+
+
+class OfflineDemoAssistant:
+    def respond(self, context: ContextPackage, request_id: str) -> str:
+        del context, request_id
+        return (
+            "这是离线演示回复，不会查询或编造公司事实。"
+            "请仅用它检查会话流程，并在正式答复前依据经审核资料人工核实。"
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -198,6 +234,102 @@ def _build_generator_from_environment() -> Generator:
         max_tokens=512,
         extra_body={"thinking": {"type": "disabled"}},
     )
+
+
+def _ui_mode_from_environment() -> str:
+    return os.environ.get("LEXIAODU_UI_MODE", "chat").strip().casefold()
+
+
+def build_chat_runtime(
+    settings: AppSettings,
+    assistant: ConversationAssistant,
+) -> ChatRuntime:
+    cipher = DataCipher.open(settings.chat.database_path.with_suffix(".key"))
+    repository = ConversationRepository(settings.chat.database_path, cipher)
+    attachments = AttachmentStore(
+        settings.chat.attachment_dir,
+        repository,
+        cipher,
+    )
+    context_builder = ContextBuilder(
+        repository,
+        recent_limit=settings.chat.recent_message_limit,
+        related_limit=settings.chat.related_message_limit,
+        character_budget=settings.chat.context_character_budget,
+    )
+    window = ChatMainWindow()
+    assistant_executor = ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="lexiaodu-assistant",
+    )
+    ocr_executor = ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="lexiaodu-chat-ocr",
+    )
+    try:
+        controller = ChatController(
+            window,
+            repository,
+            attachments,
+            context_builder,
+            assistant,
+            QtScreenCapture(),
+            PaddleOcrEngine(settings.ocr.model_cache_dir),
+            SelectionOverlay,
+            TranscriptEditor,
+            assistant_executor,
+            ocr_executor,
+        )
+    except BaseException:
+        assistant_executor.shutdown(wait=True, cancel_futures=True)
+        ocr_executor.shutdown(wait=True, cancel_futures=True)
+        raise
+    application = QApplication.instance()
+    if application is not None:
+        application.aboutToQuit.connect(controller.shutdown)
+    window.show()
+    return ChatRuntime(
+        window,
+        controller,
+        repository,
+        attachments,
+        context_builder,
+        assistant_executor,
+        ocr_executor,
+    )
+
+
+def build_legacy_runtime(
+    settings: AppSettings,
+    generator: Generator,
+) -> LegacyRuntime:
+    toolbar = FloatingToolbar(
+        settings.app_name,
+        settings.toolbar.width,
+        settings.toolbar.height,
+    )
+    controller = CaptureController(
+        toolbar,
+        QtScreenCapture(),
+        PaddleOcrEngine(settings.ocr.model_cache_dir),
+        advice_service=AdviceService(
+            KnowledgeBase(
+                settings.knowledge.root_dir,
+                settings.knowledge.database_path,
+            ),
+            generator,
+            DeterministicRiskRules(),
+        ),
+        feedback_store=FeedbackStore(
+            settings.feedback.database_path,
+        ),
+    )
+    application = QApplication.instance()
+    if application is not None:
+        application.aboutToQuit.connect(controller.shutdown)
+    _position_toolbar(toolbar, settings)
+    toolbar.show()
+    return LegacyRuntime(toolbar, controller)
 
 
 def run(argv: Sequence[str] | None = None) -> int:
@@ -370,6 +502,15 @@ def run(argv: Sequence[str] | None = None) -> int:
             return 1
         return 0
 
+    load_dotenv()
+    ui_mode = _ui_mode_from_environment()
+    if ui_mode not in {"chat", "legacy"}:
+        print(
+            "LEXIAODU_UI_MODE 必须是 chat 或 legacy",
+            file=sys.stderr,
+        )
+        return 2
+
     application = QApplication([sys.argv[0]])
     font_scaler = _configure_application(application, settings.app_name)
 
@@ -385,40 +526,24 @@ def run(argv: Sequence[str] | None = None) -> int:
         )
         return 0
 
-    load_dotenv()
+    if ui_mode == "chat":
+        runtime: ChatRuntime | LegacyRuntime = build_chat_runtime(
+            settings,
+            OfflineDemoAssistant(),
+        )
+    else:
+        try:
+            generator = _build_generator_from_environment()
+        except ValueError as exc:
+            print(f"生成器配置错误: {exc}", file=sys.stderr)
+            return 2
+        runtime = build_legacy_runtime(settings, generator)
+
     try:
-        generator = _build_generator_from_environment()
-    except ValueError as exc:
-        print(f"生成器配置错误: {exc}", file=sys.stderr)
-        return 2
-
-    toolbar = FloatingToolbar(
-        settings.app_name,
-        settings.toolbar.width,
-        settings.toolbar.height,
-    )
-
-    controller = CaptureController(
-        toolbar,
-        QtScreenCapture(),
-        PaddleOcrEngine(settings.ocr.model_cache_dir),
-        advice_service=AdviceService(
-            KnowledgeBase(
-                settings.knowledge.root_dir,
-                settings.knowledge.database_path,
-            ),
-            generator,
-            DeterministicRiskRules(),
-        ),
-        feedback_store=FeedbackStore(
-            settings.feedback.database_path,
-        ),
-    )
-    application.aboutToQuit.connect(controller.shutdown)
-    _position_toolbar(toolbar, settings)
-    toolbar.show()
-    exit_code = application.exec()
-    del controller
+        exit_code = application.exec()
+    finally:
+        runtime.controller.shutdown()
+    del runtime
     del font_scaler
     return exit_code
 

@@ -485,6 +485,14 @@ class ChatMainWindow(QMainWindow):
             self._conversations.setItemWidget(item, widget)
         del blocker
 
+    def select_conversation(self, conversation_id: str) -> bool:
+        for row in range(self._conversations.count()):
+            item = self._conversations.item(row)
+            if item.data(Qt.ItemDataRole.UserRole) == conversation_id:
+                self._conversations.setCurrentItem(item)
+                return True
+        return False
+
     def show_conversation(
         self,
         conversation_id: str,

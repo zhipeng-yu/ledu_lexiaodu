@@ -11,7 +11,7 @@ from typing import Any
 
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QColor, QImage
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from lexiaodu.attachments import AttachmentStore
 from lexiaodu.capture import CaptureResult
@@ -26,7 +26,11 @@ from lexiaodu.ocr import Speaker, TranscriptLine
 
 
 class FakeWindow(QObject):
+    create_conversation_requested = Signal()
     conversation_selected = Signal(str)
+    rename_conversation_requested = Signal(str)
+    delete_conversation_requested = Signal(str)
+    search_requested = Signal(str)
     send_requested = Signal(str)
     retry_requested = Signal(str)
     capture_requested = Signal()
@@ -37,6 +41,7 @@ class FakeWindow(QObject):
         self.conversations: tuple[ChatConversationView, ...] = ()
         self.turns: tuple[ChatTurnView, ...] = ()
         self.shown: list[tuple[str, tuple[ChatTurnView, ...]]] = []
+        self.suggestions: list[Any] = []
 
     @property
     def active_conversation_id(self) -> str | None:
@@ -60,6 +65,16 @@ class FakeWindow(QObject):
     def select(self, conversation_id: str) -> None:
         self._active_conversation_id = conversation_id
         self.conversation_selected.emit(conversation_id)
+
+    def select_conversation(self, conversation_id: str) -> bool:
+        if not any(item.id == conversation_id for item in self.conversations):
+            return False
+        self.select(conversation_id)
+        return True
+
+    def append_suggestion(self, suggestion: Any) -> bool:
+        self.suggestions.append(suggestion)
+        return True
 
 
 class ManualExecutor:
@@ -796,4 +811,117 @@ def test_pending_ocr_keeps_single_owner_until_cancel_or_editor_completion(
     window.capture_requested.emit()
     assert len(selectors) == 4
     assert selectors[3].started
+    controller.shutdown()
+
+
+def _workspace_controller(
+    tmp_path: Path,
+) -> tuple[
+    ChatController,
+    FakeWindow,
+    ConversationRepository,
+    AttachmentStore,
+]:
+    repository = repository_at(tmp_path / "chat.sqlite3")
+    attachments = AttachmentStore(
+        tmp_path / "attachments",
+        repository,
+        DataCipher(b"c" * 32),
+    )
+    capture, ocr, selector_factory, editor_factory = inert_capture_dependencies()
+    window = FakeWindow()
+    controller = ChatController(
+        window,
+        repository,
+        attachments,
+        context_builder(repository),
+        RecordingAssistant(repository, []),
+        capture,
+        ocr,
+        selector_factory,
+        editor_factory,
+        ManualExecutor(),
+        ManualExecutor(),
+    )
+    return controller, window, repository, attachments
+
+
+def test_create_intent_persists_and_selects_a_new_conversation(
+    tmp_path: Path,
+) -> None:
+    application()
+    controller, window, repository, _attachments = _workspace_controller(tmp_path)
+
+    window.create_conversation_requested.emit()
+
+    conversations = repository.list_conversations()
+    assert len(conversations) == 1
+    assert conversations[0].title == "新会话"
+    assert window.active_conversation_id == conversations[0].id
+    controller.shutdown()
+
+
+def test_search_intent_filters_titles_and_clearing_restores_all(
+    tmp_path: Path,
+) -> None:
+    application()
+    repository = repository_at(tmp_path / "chat.sqlite3")
+    repository.create_conversation("英语开口练习")
+    repository.create_conversation("数学计算练习")
+    controller, window, repository, _attachments = _workspace_controller(tmp_path)
+
+    window.search_requested.emit("英语")
+    assert [item.title for item in window.conversations] == ["英语开口练习"]
+
+    window.search_requested.emit("")
+    assert {item.title for item in window.conversations} == {
+        "英语开口练习",
+        "数学计算练习",
+    }
+    controller.shutdown()
+
+
+def test_rename_intent_uses_entered_title_and_keeps_selection(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    application()
+    repository = repository_at(tmp_path / "chat.sqlite3")
+    conversation = repository.create_conversation("旧标题")
+    controller, window, repository, _attachments = _workspace_controller(tmp_path)
+    window.select(conversation.id)
+    monkeypatch.setattr(
+        "lexiaodu.chat_controller.QInputDialog.getText",
+        lambda *_args, **_kwargs: ("新标题", True),
+    )
+
+    window.rename_conversation_requested.emit(conversation.id)
+
+    assert repository.get_conversation(conversation.id).title == "新标题"
+    assert window.active_conversation_id == conversation.id
+    controller.shutdown()
+
+
+def test_delete_intent_tombstones_conversation_and_removes_attachment(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    application()
+    repository = repository_at(tmp_path / "chat.sqlite3")
+    conversation = repository.create_conversation("待删除")
+    controller, window, repository, attachments = _workspace_controller(tmp_path)
+    image = QImage(2, 2, QImage.Format.Format_RGB32)
+    image.fill(QColor("white"))
+    attachment = attachments.save_image(conversation.id, image)
+    window.select(conversation.id)
+    monkeypatch.setattr(
+        "lexiaodu.chat_controller.QMessageBox.question",
+        lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
+    )
+
+    window.delete_conversation_requested.emit(conversation.id)
+
+    assert repository.list_conversations() == ()
+    assert not attachment.encrypted_path.exists()
+    assert window.active_conversation_id is None
     controller.shutdown()

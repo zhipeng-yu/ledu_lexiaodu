@@ -6,15 +6,41 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from PySide6.QtCore import QEvent
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication
 
 from lexiaodu.app import (
+    OfflineDemoAssistant,
     _build_generator_from_environment,
     _configure_application,
+    _ui_mode_from_environment,
+    build_chat_runtime,
+    build_legacy_runtime,
+    run,
 )
+from lexiaodu.chat_window import ChatMainWindow
+from lexiaodu.config import (
+    AppSettings,
+    ChatSettings,
+    FeedbackSettings,
+    KnowledgeSettings,
+    OcrSettings,
+)
+from lexiaodu.context import ContextPackage
 from lexiaodu.font_scaling import ApplicationFontScaler
 from lexiaodu.generator import OpenAICompatibleGenerator, SimulatedGenerator
+from lexiaodu.local_crypto import DataCipher
+from lexiaodu.toolbar import FloatingToolbar
+
+
+_APPLICATION: QApplication | None = None
+
+
+def _application() -> QApplication:
+    global _APPLICATION
+    _APPLICATION = QApplication.instance() or QApplication([])
+    return _APPLICATION
 
 
 def _clear_generator_environment(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -28,7 +54,7 @@ def _clear_generator_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_configure_application_installs_default_font_increase() -> None:
-    application = QApplication.instance() or QApplication([])
+    application = _application()
     original_font = QFont(application.font())
     original_name = application.applicationName()
     original_quit_policy = application.quitOnLastWindowClosed()
@@ -57,6 +83,7 @@ def test_configure_application_installs_default_font_increase() -> None:
         application.setFont(original_font)
         application.setApplicationName(original_name)
         application.setQuitOnLastWindowClosed(original_quit_policy)
+        application.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         application.processEvents()
 
 
@@ -136,3 +163,109 @@ def test_build_generator_configures_doubao_client(monkeypatch) -> None:
         "timeout": 30.0,
         "max_retries": 2,
     }
+
+
+class _InertOcr:
+    def preload(self) -> None:
+        pass
+
+
+def _runtime_settings(tmp_path) -> AppSettings:
+    return AppSettings(
+        ocr=OcrSettings(tmp_path / "ocr-cache"),
+        knowledge=KnowledgeSettings(
+            tmp_path / "knowledge",
+            tmp_path / "knowledge.sqlite3",
+        ),
+        feedback=FeedbackSettings(tmp_path / "feedback.sqlite3"),
+        chat=ChatSettings(
+            database_path=tmp_path / "chat.sqlite3",
+            attachment_dir=tmp_path / "attachments",
+        ),
+    )
+
+
+def test_ui_mode_defaults_to_chat_and_legacy_requires_explicit_value(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("LEXIAODU_UI_MODE", raising=False)
+    assert _ui_mode_from_environment() == "chat"
+
+    monkeypatch.setenv("LEXIAODU_UI_MODE", "legacy")
+    assert _ui_mode_from_environment() == "legacy"
+
+
+def test_build_chat_runtime_shows_chat_window_with_independent_single_workers(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    application = _application()
+    monkeypatch.setattr(
+        "lexiaodu.app.DataCipher.open",
+        lambda _path: DataCipher(b"c" * 32),
+    )
+    monkeypatch.setattr(
+        "lexiaodu.app.PaddleOcrEngine",
+        lambda _path: _InertOcr(),
+    )
+
+    runtime = build_chat_runtime(_runtime_settings(tmp_path), OfflineDemoAssistant())
+
+    try:
+        assert isinstance(runtime.window, ChatMainWindow)
+        assert runtime.window.isVisible()
+        assert not any(
+            isinstance(widget, FloatingToolbar)
+            for widget in application.topLevelWidgets()
+        )
+        assert runtime.assistant_executor is not runtime.ocr_executor
+        assert runtime.assistant_executor._max_workers == 1
+        assert runtime.ocr_executor._max_workers == 1
+    finally:
+        runtime.controller.shutdown()
+        runtime.window.close()
+
+
+def test_build_legacy_runtime_shows_existing_toolbar(tmp_path, monkeypatch) -> None:
+    _application()
+    monkeypatch.setattr(
+        "lexiaodu.app.PaddleOcrEngine",
+        lambda _path: _InertOcr(),
+    )
+
+    runtime = build_legacy_runtime(
+        _runtime_settings(tmp_path),
+        SimulatedGenerator(),
+    )
+
+    try:
+        assert isinstance(runtime.toolbar, FloatingToolbar)
+        assert runtime.toolbar.isVisible()
+    finally:
+        runtime.controller.shutdown()
+        runtime.toolbar.close()
+
+
+def test_invalid_ui_mode_exits_before_qt_or_runtime_construction(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config = tmp_path / "app.toml"
+    config.write_text("", encoding="utf-8")
+    monkeypatch.setenv("LEXIAODU_UI_MODE", "unsupported")
+
+    def unexpected_application(_argv):
+        raise AssertionError("invalid mode must not construct QApplication")
+
+    monkeypatch.setattr("lexiaodu.app.QApplication", unexpected_application)
+
+    assert run(["--config", str(config)]) == 2
+
+
+def test_offline_demo_assistant_discloses_limits_without_company_facts() -> None:
+    context = ContextPackage((), None, (), (), (), 1)
+
+    answer = OfflineDemoAssistant().respond(context, "request-id")
+
+    assert "离线演示" in answer
+    assert "不会查询或编造公司事实" in answer
