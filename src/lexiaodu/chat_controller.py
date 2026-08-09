@@ -217,6 +217,7 @@ class ChatController(QObject):
         if (
             conversation_id is None
             or self._selector is not None
+            or self._editor is not None
             or self._shutting_down
         ):
             return
@@ -301,15 +302,41 @@ class ChatController(QObject):
             lambda owner=conversation_id,
             owner_request=request_id,
             owner_attachment=attachment_id,
-            current_editor=editor: self._accept_correction(
+            current_editor=editor: self._accept_editor(
                 owner,
                 owner_request,
                 owner_attachment,
                 current_editor,
             )
         )
+        editor.finished.connect(
+            lambda _result, current_editor=editor: self._release_editor(
+                current_editor
+            )
+        )
         self._editor = editor
         editor.show()
+
+    def _accept_editor(
+        self,
+        conversation_id: str,
+        request_id: str,
+        attachment_id: str,
+        editor: TranscriptEditor,
+    ) -> None:
+        try:
+            self._accept_correction(
+                conversation_id,
+                request_id,
+                attachment_id,
+                editor,
+            )
+        finally:
+            self._release_editor(editor)
+
+    def _release_editor(self, editor: TranscriptEditor) -> None:
+        if self._editor is editor:
+            self._editor = None
 
     def _accept_correction(
         self,
