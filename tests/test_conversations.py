@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime, timedelta
+from threading import Event, Thread
 
 import pytest
 
@@ -191,6 +192,193 @@ def test_completed_request_cannot_drift_back_into_retry_state(repository) -> Non
     assert late_failure.processing_status == "completed"
     assert retried == assistant
     assert repository.list_retryable_requests(conversation.id) == ()
+
+
+def test_child_write_cannot_commit_after_conversation_deletion(
+    database_path, cipher, monkeypatch
+) -> None:
+    writer = ConversationRepository(database_path, cipher)
+    deleter = ConversationRepository(database_path, cipher)
+    conversation = writer.create_conversation("concurrent deletion")
+    writer_validated = Event()
+    release_writer = Event()
+    deletion_finished = Event()
+    errors: list[BaseException] = []
+    original_active_check = writer._active_conversation_row
+
+    def pause_after_validation(connection, conversation_id):
+        row = original_active_check(connection, conversation_id)
+        writer_validated.set()
+        assert release_writer.wait(5)
+        return row
+
+    monkeypatch.setattr(writer, "_active_conversation_row", pause_after_validation)
+
+    def append_child() -> None:
+        try:
+            writer.append_user_message(
+                conversation.id, "LATE-CHILD", request_id="late-child"
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    def delete_parent() -> None:
+        try:
+            deleter.delete_conversation(conversation.id)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            deletion_finished.set()
+
+    writer_thread = Thread(target=append_child)
+    writer_thread.start()
+    assert writer_validated.wait(5)
+    deletion_thread = Thread(target=delete_parent)
+    deletion_thread.start()
+    deletion_committed_before_release = deletion_finished.wait(0.5)
+    release_writer.set()
+    writer_thread.join(5)
+    deletion_thread.join(5)
+
+    with sqlite3.connect(database_path) as connection:
+        child_count = connection.execute(
+            "SELECT COUNT(*) FROM messages WHERE conversation_id = ?",
+            (conversation.id,),
+        ).fetchone()[0]
+
+    assert not writer_thread.is_alive()
+    assert not deletion_thread.is_alive()
+    assert errors == []
+    assert deletion_committed_before_release is False
+    assert child_count == 0
+
+
+def test_late_request_state_transition_cannot_overwrite_assistant_completion(
+    database_path, cipher, monkeypatch
+) -> None:
+    late_callback = ConversationRepository(database_path, cipher)
+    assistant_writer = ConversationRepository(database_path, cipher)
+    conversation = late_callback.create_conversation("concurrent status")
+    late_callback.append_user_message(
+        conversation.id, "REQUEST", request_id="status-race"
+    )
+    request_read = Event()
+    release_late_callback = Event()
+    assistant_finished = Event()
+    errors: list[BaseException] = []
+    original_request_row = late_callback._request_row
+
+    def pause_after_request_read(connection, conversation_id, request_id):
+        row = original_request_row(connection, conversation_id, request_id)
+        if not request_read.is_set():
+            request_read.set()
+            assert release_late_callback.wait(5)
+        return row
+
+    monkeypatch.setattr(late_callback, "_request_row", pause_after_request_read)
+
+    def mark_failed() -> None:
+        try:
+            late_callback.mark_request_failed(conversation.id, "status-race")
+        except BaseException as exc:
+            errors.append(exc)
+
+    def append_assistant() -> None:
+        try:
+            assistant_writer.append_assistant_message(
+                conversation.id,
+                "RESULT",
+                in_reply_to_request_id="status-race",
+            )
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            assistant_finished.set()
+
+    late_thread = Thread(target=mark_failed)
+    late_thread.start()
+    assert request_read.wait(5)
+    assistant_thread = Thread(target=append_assistant)
+    assistant_thread.start()
+    assistant_committed_before_release = assistant_finished.wait(0.5)
+    release_late_callback.set()
+    late_thread.join(5)
+    assistant_thread.join(5)
+
+    messages = assistant_writer.list_messages(conversation.id)
+
+    assert not late_thread.is_alive()
+    assert not assistant_thread.is_alive()
+    assert errors == []
+    assert assistant_committed_before_release is False
+    assert messages[0].processing_status == "completed"
+    assert assistant_writer.list_retryable_requests(conversation.id) == ()
+
+
+def test_concurrent_assistant_retries_return_the_same_persisted_result(
+    database_path, cipher, monkeypatch
+) -> None:
+    first_writer = ConversationRepository(database_path, cipher)
+    second_writer = ConversationRepository(database_path, cipher)
+    conversation = first_writer.create_conversation("concurrent retry")
+    first_writer.append_user_message(
+        conversation.id, "REQUEST", request_id="assistant-race"
+    )
+    first_ready_to_insert = Event()
+    release_first_writer = Event()
+    second_finished = Event()
+    results = []
+    errors: list[BaseException] = []
+    original_insert = first_writer._insert_message
+
+    def pause_before_assistant_insert(connection, message):
+        if message.role == "assistant":
+            first_ready_to_insert.set()
+            assert release_first_writer.wait(5)
+        return original_insert(connection, message)
+
+    monkeypatch.setattr(first_writer, "_insert_message", pause_before_assistant_insert)
+
+    def append(repository, body, finished=None) -> None:
+        try:
+            results.append(
+                repository.append_assistant_message(
+                    conversation.id,
+                    body,
+                    in_reply_to_request_id="assistant-race",
+                )
+            )
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            if finished is not None:
+                finished.set()
+
+    first_thread = Thread(target=append, args=(first_writer, "FIRST"))
+    first_thread.start()
+    assert first_ready_to_insert.wait(5)
+    second_thread = Thread(
+        target=append, args=(second_writer, "SECOND", second_finished)
+    )
+    second_thread.start()
+    second_committed_before_release = second_finished.wait(0.5)
+    release_first_writer.set()
+    first_thread.join(5)
+    second_thread.join(5)
+
+    assistant_messages = tuple(
+        message
+        for message in first_writer.list_messages(conversation.id)
+        if message.role == "assistant"
+    )
+
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+    assert errors == []
+    assert second_committed_before_release is False
+    assert len(results) == 2
+    assert results[0] == results[1] == assistant_messages[0]
+    assert len(assistant_messages) == 1
 
 
 def test_business_content_and_model_metadata_are_not_plaintext(

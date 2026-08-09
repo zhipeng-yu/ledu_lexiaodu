@@ -110,6 +110,10 @@ class ConversationRepository:
         connection.execute("PRAGMA secure_delete=ON")
         return connection
 
+    @staticmethod
+    def _begin_write(connection: sqlite3.Connection) -> None:
+        connection.execute("BEGIN IMMEDIATE")
+
     def _initialize(self) -> None:
         with self._connect() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
@@ -189,6 +193,7 @@ class ConversationRepository:
             updated_at=now,
         )
         with self._connect() as connection:
+            self._begin_write(connection)
             connection.execute(
                 """
                 INSERT INTO conversations(
@@ -226,6 +231,7 @@ class ConversationRepository:
     def rename_conversation(self, conversation_id: str, title: str) -> Conversation:
         now = self._now()
         with self._connect() as connection:
+            self._begin_write(connection)
             self._active_conversation_row(connection, conversation_id)
             connection.execute(
                 """
@@ -290,6 +296,7 @@ class ConversationRepository:
             created_at=now,
         )
         with self._connect() as connection:
+            self._begin_write(connection)
             self._active_conversation_row(connection, conversation_id)
             self._insert_message(connection, message)
             self._touch_conversation(connection, conversation_id, now)
@@ -307,6 +314,7 @@ class ConversationRepository:
         now = self._now()
         metadata_text = self._serialize_metadata(model_metadata)
         with self._connect() as connection:
+            self._begin_write(connection)
             self._active_conversation_row(connection, conversation_id)
             request = self._request_row(
                 connection, conversation_id, in_reply_to_request_id
@@ -405,6 +413,7 @@ class ConversationRepository:
         now = self._now()
         fact = ConfirmedFact(uuid4().hex, conversation_id, body, now)
         with self._connect() as connection:
+            self._begin_write(connection)
             self._active_conversation_row(connection, conversation_id)
             connection.execute(
                 """
@@ -456,6 +465,7 @@ class ConversationRepository:
             now,
         )
         with self._connect() as connection:
+            self._begin_write(connection)
             conversation = self._active_conversation_row(connection, conversation_id)
             if context_version != conversation["context_version"]:
                 raise ValueError("Context summary version is stale")
@@ -498,6 +508,7 @@ class ConversationRepository:
     def delete_conversation(self, conversation_id: str) -> None:
         now = self._now()
         with self._connect() as connection:
+            self._begin_write(connection)
             self._active_conversation_row(connection, conversation_id)
             self._queue_attachment_cleanup(connection, conversation_id, now)
             self._queue_cleanup_job(
@@ -548,6 +559,7 @@ class ConversationRepository:
     ) -> PendingRequest:
         metadata_text = self._serialize_metadata(model_metadata)
         with self._connect() as connection:
+            self._begin_write(connection)
             self._active_conversation_row(connection, conversation_id)
             row = self._request_row(connection, conversation_id, request_id)
             if row["processing_status"] == "completed":
