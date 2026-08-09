@@ -4,6 +4,7 @@ import sqlite3
 from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime, timedelta
 from threading import Event, Thread
+from types import SimpleNamespace
 
 import pytest
 
@@ -567,3 +568,80 @@ def test_attachment_cleanup_jobs_are_conversation_scoped_and_completion_is_idemp
 
     assert repository.list_cleanup_jobs(first.id, "delete_attachment") == ()
     assert repository.list_cleanup_jobs(second.id, "delete_attachment") == second_jobs
+
+
+def test_equal_timestamps_preserve_true_message_append_order(
+    database_path, cipher, monkeypatch
+) -> None:
+    fixed_time = datetime(2026, 8, 9, 12, 0, tzinfo=UTC)
+    generated_ids = iter(("conversation", "z-message", "a-message", "m-message"))
+    monkeypatch.setattr(
+        "lexiaodu.conversations.uuid4",
+        lambda: SimpleNamespace(hex=next(generated_ids)),
+    )
+    repository = ConversationRepository(database_path, cipher, clock=lambda: fixed_time)
+    conversation = repository.create_conversation("same timestamp")
+    appended = tuple(
+        repository.append_user_message(
+            conversation.id,
+            body,
+            request_id=f"same-time-{index}",
+        )
+        for index, body in enumerate(("first", "second", "third"))
+    )
+
+    assert repository.list_messages(conversation.id) == appended
+
+
+def test_message_changes_invalidate_only_summaries_covering_the_message(
+    repository,
+) -> None:
+    conversation = repository.create_conversation("message changes")
+    first = repository.append_user_message(
+        conversation.id, "first", request_id="message-change-first"
+    )
+    second = repository.append_user_message(
+        conversation.id, "second", request_id="message-change-second"
+    )
+    third = repository.append_user_message(
+        conversation.id, "third", request_id="message-change-third"
+    )
+    repository.save_context_summary(
+        conversation.id,
+        "first two",
+        start_message_id=first.id,
+        end_message_id=second.id,
+        context_version=conversation.context_version,
+    )
+
+    edited = repository.edit_message(conversation.id, third.id, "third edited")
+    assert edited.body == "third edited"
+    assert (
+        repository.get_conversation(conversation.id).context_version
+        == conversation.context_version
+    )
+
+    repository.delete_message(conversation.id, first.id)
+
+    assert repository.get_conversation(conversation.id).context_version == 2
+    assert repository.list_messages(conversation.id) == (second, edited)
+
+
+def test_attachment_text_listing_filters_uncorrected_and_other_conversations(
+    repository, tmp_path
+) -> None:
+    first = repository.create_conversation("attachment text first")
+    second = repository.create_conversation("attachment text second")
+    corrected = repository.save_attachment(
+        first.id, "d" * 32, tmp_path / "corrected.bin", b"corrected-key"
+    )
+    repository.save_attachment(
+        first.id, "e" * 32, tmp_path / "uncorrected.bin", b"uncorrected-key"
+    )
+    other = repository.save_attachment(
+        second.id, "f" * 32, tmp_path / "other.bin", b"other-key"
+    )
+    corrected = repository.save_corrected_text(first.id, corrected.id, "FIRST OCR")
+    repository.save_corrected_text(second.id, other.id, "SECOND OCR")
+
+    assert repository.list_attachment_texts(first.id) == (corrected,)

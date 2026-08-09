@@ -99,6 +99,10 @@ class Attachment:
     corrected_text: str | None
     created_at: datetime
 
+    @property
+    def text(self) -> str:
+        return self.corrected_text or ""
+
 
 @dataclass(frozen=True, slots=True)
 class CleanupJob:
@@ -157,7 +161,8 @@ class ConversationRepository:
                     in_reply_to_request_id TEXT UNIQUE,
                     processing_status TEXT NOT NULL,
                     encrypted_model_metadata BLOB,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    append_order INTEGER NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS messages_by_conversation
                     ON messages(conversation_id, created_at, id);
@@ -208,6 +213,13 @@ class ConversationRepository:
                 );
                 CREATE INDEX IF NOT EXISTS cleanup_jobs_by_conversation
                     ON cleanup_jobs(conversation_id, status, created_at, id);
+                """
+            )
+            self._ensure_message_append_order(connection)
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS messages_by_append_order
+                ON messages(conversation_id, append_order)
                 """
             )
             connection.execute(
@@ -402,11 +414,54 @@ class ConversationRepository:
                 """
                 SELECT * FROM messages
                 WHERE conversation_id = ?
-                ORDER BY created_at, id
+                ORDER BY append_order
                 """,
                 (conversation_id,),
             ).fetchall()
         return tuple(self._message_from_row(row) for row in rows)
+
+    def edit_message(
+        self, conversation_id: str, message_id: str, body: str
+    ) -> Message:
+        now = self._now()
+        with self._connect() as connection:
+            self._begin_write(connection)
+            self._active_conversation_row(connection, conversation_id)
+            message = self._message_row(connection, conversation_id, message_id)
+            invalidates_summary = self._message_is_covered_by_current_summary(
+                connection, conversation_id, message["append_order"]
+            )
+            connection.execute(
+                """
+                UPDATE messages SET encrypted_body = ?
+                WHERE id = ? AND conversation_id = ?
+                """,
+                (self._encrypt_text(body), message_id, conversation_id),
+            )
+            self._touch_after_message_change(
+                connection, conversation_id, now, invalidates_summary
+            )
+            updated = self._message_row(connection, conversation_id, message_id)
+        return self._message_from_row(updated)
+
+    def delete_message(self, conversation_id: str, message_id: str) -> None:
+        now = self._now()
+        with self._connect() as connection:
+            self._begin_write(connection)
+            self._active_conversation_row(connection, conversation_id)
+            message = self._message_row(connection, conversation_id, message_id)
+            invalidates_summary = self._message_is_covered_by_current_summary(
+                connection, conversation_id, message["append_order"]
+            )
+            connection.execute(
+                """
+                DELETE FROM messages WHERE id = ? AND conversation_id = ?
+                """,
+                (message_id, conversation_id),
+            )
+            self._touch_after_message_change(
+                connection, conversation_id, now, invalidates_summary
+            )
 
     def mark_request_processing(
         self,
@@ -603,6 +658,25 @@ class ConversationRepository:
             ).fetchall()
         return tuple(self._attachment_from_row(row) for row in rows)
 
+    def list_attachment_texts(
+        self, conversation_id: str
+    ) -> tuple[Attachment, ...]:
+        with self._connect() as connection:
+            self._active_conversation_row(connection, conversation_id)
+            rows = connection.execute(
+                """
+                SELECT attachments.*, corrected_ocr_texts.encrypted_text
+                FROM attachments
+                JOIN corrected_ocr_texts
+                    ON corrected_ocr_texts.attachment_id = attachments.id
+                    AND corrected_ocr_texts.conversation_id = attachments.conversation_id
+                WHERE attachments.conversation_id = ?
+                ORDER BY attachments.created_at, attachments.id
+                """,
+                (conversation_id,),
+            ).fetchall()
+        return tuple(self._attachment_from_row(row) for row in rows)
+
     def save_corrected_text(
         self,
         conversation_id: str,
@@ -761,13 +835,20 @@ class ConversationRepository:
             if message.model_metadata is not None
             else None
         )
+        append_order = connection.execute(
+            """
+            SELECT COALESCE(MAX(append_order), 0) + 1
+            FROM messages WHERE conversation_id = ?
+            """,
+            (message.conversation_id,),
+        ).fetchone()[0]
         connection.execute(
             """
             INSERT INTO messages(
                 id, conversation_id, role, kind, encrypted_body,
                 request_id, in_reply_to_request_id, processing_status,
-                encrypted_model_metadata, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                encrypted_model_metadata, created_at, append_order
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 message.id,
@@ -780,8 +861,86 @@ class ConversationRepository:
                 message.processing_status,
                 encrypted_metadata,
                 self._format_time(message.created_at),
+                append_order,
             ),
         )
+
+    def _ensure_message_append_order(
+        self, connection: sqlite3.Connection
+    ) -> None:
+        if "append_order" not in self._table_columns(connection, "messages"):
+            connection.execute("ALTER TABLE messages ADD COLUMN append_order INTEGER")
+        rows = connection.execute(
+            """
+            SELECT rowid, conversation_id FROM messages
+            WHERE append_order IS NULL
+            ORDER BY rowid
+            """
+        ).fetchall()
+        next_orders = {
+            row["conversation_id"]: row["next_order"]
+            for row in connection.execute(
+                """
+                SELECT conversation_id, COALESCE(MAX(append_order), 0) + 1 AS next_order
+                FROM messages GROUP BY conversation_id
+                """
+            ).fetchall()
+        }
+        for row in rows:
+            conversation_id = row["conversation_id"]
+            append_order = next_orders.get(conversation_id, 1)
+            connection.execute(
+                "UPDATE messages SET append_order = ? WHERE rowid = ?",
+                (append_order, row["rowid"]),
+            )
+            next_orders[conversation_id] = append_order + 1
+
+    def _message_is_covered_by_current_summary(
+        self,
+        connection: sqlite3.Connection,
+        conversation_id: str,
+        append_order: int,
+    ) -> bool:
+        row = connection.execute(
+            """
+            SELECT 1
+            FROM context_summaries AS summary
+            JOIN conversations AS conversation
+                ON conversation.id = summary.conversation_id
+            JOIN messages AS first_message
+                ON first_message.id = summary.start_message_id
+                AND first_message.conversation_id = summary.conversation_id
+            JOIN messages AS last_message
+                ON last_message.id = summary.end_message_id
+                AND last_message.conversation_id = summary.conversation_id
+            WHERE summary.conversation_id = ?
+                AND summary.context_version = conversation.context_version
+                AND ? BETWEEN MIN(first_message.append_order, last_message.append_order)
+                    AND MAX(first_message.append_order, last_message.append_order)
+            LIMIT 1
+            """,
+            (conversation_id, append_order),
+        ).fetchone()
+        return row is not None
+
+    def _touch_after_message_change(
+        self,
+        connection: sqlite3.Connection,
+        conversation_id: str,
+        now: datetime,
+        invalidates_summary: bool,
+    ) -> None:
+        if invalidates_summary:
+            connection.execute(
+                """
+                UPDATE conversations
+                SET context_version = context_version + 1, updated_at = ?
+                WHERE id = ? AND deleted_at IS NULL
+                """,
+                (self._format_time(now), conversation_id),
+            )
+            return
+        self._touch_conversation(connection, conversation_id, now)
 
     def _active_conversation_row(
         self, connection: sqlite3.Connection, conversation_id: str
