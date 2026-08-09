@@ -62,6 +62,7 @@ class ChatController(QObject):
         self._ocr_executor = ocr_executor
         self._selector: SelectionOverlay | None = None
         self._editor: TranscriptEditor | None = None
+        self._capture_request_id: str | None = None
         self._shutting_down = False
 
         self._assistant_completed.connect(self._handle_assistant_completion)
@@ -218,11 +219,17 @@ class ChatController(QObject):
             conversation_id is None
             or self._selector is not None
             or self._editor is not None
+            or self._capture_request_id is not None
             or self._shutting_down
         ):
             return
         request_id = uuid4().hex
-        selector = self._selector_factory()
+        self._capture_request_id = request_id
+        try:
+            selector = self._selector_factory()
+        except Exception:
+            self._release_capture(request_id)
+            return
         self._selector = selector
         selector.region_selected.connect(
             lambda region,
@@ -233,12 +240,26 @@ class ChatController(QObject):
                 region,
             )
         )
-        selector.cancelled.connect(self._cancel_capture)
-        selector.start()
+        selector.cancelled.connect(
+            lambda owner_request=request_id: self._cancel_capture(
+                owner_request
+            )
+        )
+        try:
+            selector.start()
+        except Exception:
+            self._dispose_selector()
+            self._release_capture(request_id)
 
-    @Slot()
-    def _cancel_capture(self) -> None:
+    def _cancel_capture(self, request_id: str) -> None:
+        if self._capture_request_id != request_id:
+            return
         self._dispose_selector()
+        self._release_capture(request_id)
+
+    def _release_capture(self, request_id: str) -> None:
+        if self._capture_request_id == request_id:
+            self._capture_request_id = None
 
     def _dispose_selector(self) -> None:
         if self._selector is None:
@@ -254,20 +275,28 @@ class ChatController(QObject):
         request_id: str,
         region: ScreenRegion,
     ) -> None:
-        if self._shutting_down:
+        if (
+            self._shutting_down
+            or self._capture_request_id != request_id
+        ):
             return
         self._dispose_selector()
-        result = self._capture.capture(region)
-        attachment = self._attachments.save_image(
-            conversation_id,
-            result.image,
-        )
+        try:
+            result = self._capture.capture(region)
+            attachment = self._attachments.save_image(
+                conversation_id,
+                result.image,
+            )
+        except Exception:
+            self._release_capture(request_id)
+            return
         try:
             future = self._ocr_executor.submit(
                 self._ocr.recognize,
                 result.image,
             )
         except Exception:
+            self._release_capture(request_id)
             return
         future.add_done_callback(
             lambda completed,
@@ -283,13 +312,17 @@ class ChatController(QObject):
         self,
         result: tuple[str, str, str, Future[list[TranscriptLine]]],
     ) -> None:
-        if self._shutting_down:
-            return
         conversation_id, request_id, attachment_id, future = result
+        if (
+            self._shutting_down
+            or self._capture_request_id != request_id
+        ):
+            return
         try:
             lines = future.result()
             notice = "请核对 OCR 文字和发言人。"
         except CancelledError:
+            self._release_capture(request_id)
             return
         except OcrError as exc:
             lines = []
@@ -297,25 +330,32 @@ class ChatController(QObject):
         except Exception as exc:
             lines = []
             notice = f"OCR 识别失败：{exc}。请在下方手动粘贴文字。"
-        editor = self._editor_factory(lines, notice)
-        editor.accepted.connect(
-            lambda owner=conversation_id,
-            owner_request=request_id,
-            owner_attachment=attachment_id,
-            current_editor=editor: self._accept_editor(
-                owner,
-                owner_request,
-                owner_attachment,
-                current_editor,
+        try:
+            editor = self._editor_factory(lines, notice)
+            self._editor = editor
+            editor.accepted.connect(
+                lambda owner=conversation_id,
+                owner_request=request_id,
+                owner_attachment=attachment_id,
+                current_editor=editor: self._accept_editor(
+                    owner,
+                    owner_request,
+                    owner_attachment,
+                    current_editor,
+                )
             )
-        )
-        editor.finished.connect(
-            lambda _result, current_editor=editor: self._release_editor(
-                current_editor
+            editor.finished.connect(
+                lambda _result,
+                owner_request=request_id,
+                current_editor=editor: self._release_editor(
+                    current_editor,
+                    owner_request,
+                )
             )
-        )
-        self._editor = editor
-        editor.show()
+            editor.show()
+        except Exception:
+            self._dispose_editor()
+            self._release_capture(request_id)
 
     def _accept_editor(
         self,
@@ -332,11 +372,16 @@ class ChatController(QObject):
                 editor,
             )
         finally:
-            self._release_editor(editor)
+            self._release_editor(editor, request_id)
 
-    def _release_editor(self, editor: TranscriptEditor) -> None:
+    def _release_editor(
+        self,
+        editor: TranscriptEditor,
+        request_id: str,
+    ) -> None:
         if self._editor is editor:
             self._editor = None
+            self._release_capture(request_id)
 
     def _accept_correction(
         self,
@@ -385,6 +430,7 @@ class ChatController(QObject):
         if self._shutting_down:
             return
         self._shutting_down = True
+        self._capture_request_id = None
         self._dispose_selector()
         self._dispose_editor()
         self._assistant_executor.shutdown(wait=True, cancel_futures=True)

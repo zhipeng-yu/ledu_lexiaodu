@@ -716,3 +716,84 @@ def test_open_editor_blocks_capture_and_accept_or_close_releases_it(
     window.capture_requested.emit()
     assert len(selectors) == 3
     assert selectors[2].started
+
+
+def test_pending_ocr_keeps_single_owner_until_cancel_or_editor_completion(
+    tmp_path: Path,
+) -> None:
+    application()
+    repository = repository_at(tmp_path / "chat.sqlite3")
+    conversation = repository.create_conversation("single screenshot owner")
+    attachments = AttachmentStore(
+        tmp_path / "attachments",
+        repository,
+        DataCipher(b"c" * 32),
+    )
+    image = QImage(4, 3, QImage.Format.Format_RGB32)
+    capture = FakeCapture(image)
+    ocr = FakeOcr([TranscriptLine(Speaker.PARENT, "OCR")])
+    selectors: list[FakeSelector] = []
+    editors: list[FakeEditor] = []
+
+    def selector_factory() -> FakeSelector:
+        selector = FakeSelector()
+        selectors.append(selector)
+        return selector
+
+    def editor_factory(
+        lines: Sequence[TranscriptLine], notice: str
+    ) -> FakeEditor:
+        editor = FakeEditor(lines, notice, "CORRECTED")
+        editors.append(editor)
+        return editor
+
+    ocr_executor = ManualExecutor()
+    window = FakeWindow()
+    controller = ChatController(
+        window,
+        repository,
+        attachments,
+        context_builder(repository),
+        RecordingAssistant(repository, ["unused"]),
+        capture,
+        ocr,
+        selector_factory,
+        editor_factory,
+        ManualExecutor(),
+        ocr_executor,
+    )
+    ocr_executor.run_next()  # preload
+    window.select(conversation.id)
+
+    window.capture_requested.emit()
+    selectors[0].region_selected.emit(ScreenRegion(10, 20, 4, 3))
+    assert len(ocr_executor.pending) == 1
+
+    window.capture_requested.emit()
+    assert len(selectors) == 1
+    assert len(ocr_executor.pending) == 1
+
+    pending_ocr, _function, _args = ocr_executor.pending.pop(0)
+    pending_ocr.cancel()
+    assert editors == []
+
+    window.capture_requested.emit()
+    assert len(selectors) == 2
+    selectors[1].region_selected.emit(ScreenRegion(20, 30, 4, 3))
+    ocr_executor.run_next()
+    assert len(ocr.images) == 1
+    assert len(editors) == 1
+    assert editors[0].shown
+
+    window.capture_requested.emit()
+    assert len(selectors) == 2
+
+    editors[0].finished.emit(0)
+    window.capture_requested.emit()
+    assert len(selectors) == 3
+    selectors[2].cancelled.emit()
+
+    window.capture_requested.emit()
+    assert len(selectors) == 4
+    assert selectors[3].started
+    controller.shutdown()
