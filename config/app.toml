@@ -24,3 +24,10 @@ excluded_source_parts = ["顾问聊天记录"]
 
 [feedback]
 database_path = "data/feedback.sqlite3"
+
+[chat]
+database_path = "data/chat.sqlite3"
+attachment_dir = "data/chat-attachments"
+recent_message_limit = 12
+related_message_limit = 4
+context_character_budget = 18000

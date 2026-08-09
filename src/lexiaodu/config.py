@@ -47,6 +47,15 @@ class FeedbackSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class ChatSettings:
+    database_path: Path = Path("data/chat.sqlite3")
+    attachment_dir: Path = Path("data/chat-attachments")
+    recent_message_limit: int = 12
+    related_message_limit: int = 4
+    context_character_budget: int = 18000
+
+
+@dataclass(frozen=True, slots=True)
 class AppSettings:
     app_name: str = "乐小读"
     toolbar: ToolbarSettings = ToolbarSettings()
@@ -55,6 +64,7 @@ class AppSettings:
     knowledge: KnowledgeSettings = KnowledgeSettings()
     knowledge_import: KnowledgeImportSettings = KnowledgeImportSettings()
     feedback: FeedbackSettings = FeedbackSettings()
+    chat: ChatSettings = ChatSettings()
 
 
 def _table(data: dict[str, Any], name: str) -> dict[str, Any]:
@@ -90,6 +100,7 @@ def load_settings(path: Path) -> AppSettings:
     knowledge = _table(raw, "knowledge")
     knowledge_import = _table(raw, "knowledge_import")
     feedback = _table(raw, "feedback")
+    chat = _table(raw, "chat")
 
     app_name = app.get("name", "乐小读")
     if not isinstance(app_name, str) or not app_name.strip():
@@ -135,6 +146,13 @@ def load_settings(path: Path) -> AppSettings:
     ):
         raise SettingsError("feedback.database_path 必须是非空字符串")
 
+    chat_database_path = chat.get("database_path", "data/chat.sqlite3")
+    if not isinstance(chat_database_path, str) or not chat_database_path.strip():
+        raise SettingsError("chat.database_path must be a non-empty string")
+    chat_attachment_dir = chat.get("attachment_dir", "data/chat-attachments")
+    if not isinstance(chat_attachment_dir, str) or not chat_attachment_dir.strip():
+        raise SettingsError("chat.attachment_dir must be a non-empty string")
+
     return AppSettings(
         app_name=app_name,
         toolbar=ToolbarSettings(
@@ -158,5 +176,12 @@ def load_settings(path: Path) -> AppSettings:
         ),
         feedback=FeedbackSettings(
             database_path=Path(feedback_database_path),
+        ),
+        chat=ChatSettings(
+            database_path=Path(chat_database_path),
+            attachment_dir=Path(chat_attachment_dir),
+            recent_message_limit=_integer(chat, "recent_message_limit", 12),
+            related_message_limit=_integer(chat, "related_message_limit", 4),
+            context_character_budget=_integer(chat, "context_character_budget", 18000),
         ),
     )
