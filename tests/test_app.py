@@ -204,7 +204,6 @@ def test_build_office_reader_configures_official_ark_services(monkeypatch) -> No
     monkeypatch.setenv("VOLC_ACCESSKEY", "access-key")
     monkeypatch.setenv("VOLC_SECRETKEY", "secret-key")
     monkeypatch.setenv("ARK_KB_COLLECTION", "office-originals")
-    monkeypatch.setenv("TOS_BUCKET", "private-bucket")
     captured = {}
     collection = SimpleNamespace(project="default", resource_id="resource-1")
 
@@ -216,15 +215,10 @@ def test_build_office_reader_configures_official_ark_services(monkeypatch) -> No
             captured["collection"] = (name, project)
             return collection
 
-    def fake_tos_client(*args, **kwargs):
-        captured["tos"] = (args, kwargs)
-        return SimpleNamespace()
-
     monkeypatch.setattr(
         "lexiaodu.app.VikingKnowledgeBaseService",
         FakeKnowledgeService,
     )
-    monkeypatch.setattr("lexiaodu.app.tos.TosClientV2", fake_tos_client)
 
     reader = _build_office_reader_from_environment()
 
@@ -240,15 +234,6 @@ def test_build_office_reader_configures_official_ark_services(monkeypatch) -> No
             "socket_timeout": 30,
         },
         "collection": ("office-originals", "default"),
-        "tos": (
-            (
-                "access-key",
-                "secret-key",
-                "tos-cn-beijing.volces.com",
-                "cn-beijing",
-            ),
-            {"request_timeout": 300, "socket_timeout": 300},
-        ),
     }
 
 

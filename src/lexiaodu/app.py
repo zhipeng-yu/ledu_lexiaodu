@@ -11,7 +11,6 @@ from typing import Sequence
 from dotenv import load_dotenv
 from openai import OpenAI
 from PySide6.QtWidgets import QApplication
-import tos
 from volcengine.viking_knowledgebase import VikingKnowledgeBaseService
 
 from lexiaodu.advisor_assistant import OpenAIConversationAssistant
@@ -102,7 +101,6 @@ def _build_office_reader_from_environment() -> ArkOfficeDocumentReader | None:
             "VOLC_ACCESSKEY",
             "VOLC_SECRETKEY",
             "ARK_KB_COLLECTION",
-            "TOS_BUCKET",
         )
     }
     if not any(required.values()):
@@ -115,7 +113,6 @@ def _build_office_reader_from_environment() -> ArkOfficeDocumentReader | None:
     access_key = required["VOLC_ACCESSKEY"]
     secret_key = required["VOLC_SECRETKEY"]
     collection_name = required["ARK_KB_COLLECTION"]
-    bucket = required["TOS_BUCKET"]
     region = os.environ.get("VOLC_REGION", "cn-beijing").strip()
     project = os.environ.get("ARK_KB_PROJECT", "default").strip()
     knowledge_service = VikingKnowledgeBaseService(
@@ -134,22 +131,9 @@ def _build_office_reader_from_environment() -> ArkOfficeDocumentReader | None:
         collection_name,
         project=project,
     )
-    tos_client = tos.TosClientV2(
-        access_key,
-        secret_key,
-        os.environ.get(
-            "TOS_ENDPOINT",
-            "tos-cn-beijing.volces.com",
-        ).strip(),
-        region,
-        request_timeout=300,
-        socket_timeout=300,
-    )
     return ArkOfficeDocumentReader(
-        tos_client,
         knowledge_service,
         collection,
-        bucket,
     )
 
 
