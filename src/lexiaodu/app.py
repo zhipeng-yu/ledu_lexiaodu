@@ -14,14 +14,11 @@ from PySide6.QtWidgets import QApplication
 
 from lexiaodu.advisor_assistant import OpenAIConversationAssistant
 from lexiaodu.attachments import AttachmentStore
-from lexiaodu.capture import CaptureError, CaptureResult, QtScreenCapture, screen_bounds
 from lexiaodu.chat_controller import ChatController, ConversationAssistant
 from lexiaodu.chat_window import ChatMainWindow
 from lexiaodu.config import AppSettings, SettingsError, load_settings
 from lexiaodu.context import ContextBuilder, ContextPackage
 from lexiaodu.conversations import ConversationRepository
-from lexiaodu.domain import centered_region
-from lexiaodu.editor import TranscriptEditor
 from lexiaodu.font_scaling import ApplicationFontScaler
 from lexiaodu.generator import (
     Generator,
@@ -44,7 +41,6 @@ from lexiaodu.knowledge_import import (
 )
 from lexiaodu.local_crypto import DataCipher
 from lexiaodu.ocr import PaddleOcrEngine
-from lexiaodu.selection import SelectionOverlay
 
 
 @dataclass(slots=True)
@@ -55,7 +51,6 @@ class ChatRuntime:
     attachments: AttachmentStore
     context_builder: ContextBuilder
     assistant_executor: ThreadPoolExecutor
-    ocr_executor: ThreadPoolExecutor
 
 
 class OfflineDemoAssistant:
@@ -74,11 +69,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("config/app.toml"),
         help="TOML 配置文件路径",
-    )
-    parser.add_argument(
-        "--capture-smoke",
-        action="store_true",
-        help="在内存中截取主屏幕中央区域后退出",
     )
     parser.add_argument(
         "--rebuild-knowledge",
@@ -147,18 +137,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="统计policy文件、章节及semantic/source证据绑定情况",
     )
     return parser
-
-
-def capture_primary_region(settings: AppSettings) -> CaptureResult:
-    screen = QApplication.primaryScreen()
-    if screen is None:
-        raise CaptureError("没有可用的主屏幕")
-    region = centered_region(
-        screen_bounds(screen),
-        settings.capture.width,
-        settings.capture.height,
-    )
-    return QtScreenCapture().capture(region)
 
 
 def _configure_application(
@@ -251,10 +229,6 @@ def build_chat_runtime(
         max_workers=1,
         thread_name_prefix="lexiaodu-assistant",
     )
-    ocr_executor = ThreadPoolExecutor(
-        max_workers=1,
-        thread_name_prefix="lexiaodu-chat-ocr",
-    )
     try:
         controller = ChatController(
             window,
@@ -262,16 +236,10 @@ def build_chat_runtime(
             attachments,
             context_builder,
             assistant,
-            QtScreenCapture(),
-            PaddleOcrEngine(settings.ocr.model_cache_dir),
-            SelectionOverlay,
-            TranscriptEditor,
             assistant_executor,
-            ocr_executor,
         )
     except BaseException:
         assistant_executor.shutdown(wait=True, cancel_futures=True)
-        ocr_executor.shutdown(wait=True, cancel_futures=True)
         raise
     application = QApplication.instance()
     if application is not None:
@@ -287,7 +255,6 @@ def build_chat_runtime(
         attachments,
         context_builder,
         assistant_executor,
-        ocr_executor,
     )
 
 
@@ -464,18 +431,6 @@ def run(argv: Sequence[str] | None = None) -> int:
     load_dotenv()
     application = QApplication([sys.argv[0]])
     font_scaler = _configure_application(application, settings.app_name)
-
-    if args.capture_smoke:
-        try:
-            result = capture_primary_region(settings)
-        except CaptureError as exc:
-            print(f"截图失败: {exc}", file=sys.stderr)
-            return 1
-        print(
-            "内存截图成功: "
-            f"{result.pixel_width}x{result.pixel_height}, {result.screen_name}"
-        )
-        return 0
 
     runtime = build_chat_runtime(
         settings,

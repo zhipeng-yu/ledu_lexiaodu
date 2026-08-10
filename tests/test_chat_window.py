@@ -60,7 +60,8 @@ def test_window_exposes_chat_first_shell_with_closed_context_drawer() -> None:
     assert window.findChild(QListWidget, "conversationSidebar") is not None
     assert window.findChild(QListWidget, "messageTimeline") is not None
     assert window.findChild(QPlainTextEdit, "chatComposer") is not None
-    assert window.findChild(QPushButton, "captureScreenshot") is not None
+    assert window.findChild(QPushButton, "captureScreenshot") is None
+    assert window.findChild(QPushButton, "pasteScreenshot") is None
     assert window.findChild(QPushButton, "sendMessage") is not None
     drawer = window.findChild(QFrame, "contextDrawer")
     assert drawer is not None
@@ -179,16 +180,12 @@ def test_workspace_actions_emit_the_selected_id_and_search_text() -> None:
     renamed: list[str] = []
     deleted: list[str] = []
     searched: list[str] = []
-    captured: list[bool] = []
-    pasted: list[bool] = []
     generated: list[str] = []
     drawers: list[str] = []
     window.create_conversation_requested.connect(lambda: created.append(True))
     window.rename_conversation_requested.connect(renamed.append)
     window.delete_conversation_requested.connect(deleted.append)
     window.search_requested.connect(searched.append)
-    window.capture_requested.connect(lambda: captured.append(True))
-    window.paste_requested.connect(lambda: pasted.append(True))
     window.generate_reply_requested.connect(generated.append)
     window.open_drawer_requested.connect(drawers.append)
     assert sidebar is not None
@@ -203,8 +200,6 @@ def test_workspace_actions_emit_the_selected_id_and_search_text() -> None:
         "newConversation",
         "renameConversation",
         "deleteConversation",
-        "captureScreenshot",
-        "pasteScreenshot",
         "generateReply",
         "openContextDrawer",
     ):
@@ -225,8 +220,6 @@ def test_workspace_actions_emit_the_selected_id_and_search_text() -> None:
     assert renamed == ["stored-id"]
     assert deleted == ["stored-id"]
     assert searched == ["英语开口"]
-    assert captured == [True]
-    assert pasted == [True]
     assert generated == []
     assert drawers == []
     assert application is not None

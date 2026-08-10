@@ -5,53 +5,6 @@ from typing import Any, Mapping
 
 
 @dataclass(frozen=True, slots=True)
-class ScreenRegion:
-    """A rectangle in Qt logical desktop coordinates."""
-
-    x: int
-    y: int
-    width: int
-    height: int
-
-    def __post_init__(self) -> None:
-        if self.width <= 0 or self.height <= 0:
-            raise ValueError("截图区域的宽和高必须为正整数")
-
-    @property
-    def right(self) -> int:
-        return self.x + self.width
-
-    @property
-    def bottom(self) -> int:
-        return self.y + self.height
-
-    def is_within(self, bounds: ScreenRegion) -> bool:
-        return (
-            self.x >= bounds.x
-            and self.y >= bounds.y
-            and self.right <= bounds.right
-            and self.bottom <= bounds.bottom
-        )
-
-
-def centered_region(
-    bounds: ScreenRegion, desired_width: int, desired_height: int
-) -> ScreenRegion:
-    """Return a centered region, clamped to the supplied screen bounds."""
-
-    if desired_width <= 0 or desired_height <= 0:
-        raise ValueError("截图区域的目标宽和高必须为正整数")
-    width = min(desired_width, bounds.width)
-    height = min(desired_height, bounds.height)
-    return ScreenRegion(
-        x=bounds.x + (bounds.width - width) // 2,
-        y=bounds.y + (bounds.height - height) // 2,
-        width=width,
-        height=height,
-    )
-
-
-@dataclass(frozen=True, slots=True)
 class ReadingMaterial:
     identifier: str
     title: str

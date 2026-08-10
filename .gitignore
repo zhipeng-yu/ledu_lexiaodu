@@ -21,6 +21,7 @@ artifacts/
 *.log
 data/
 knowledge/
+company_documents/
 
 # Editors and operating systems
 .idea/

@@ -1,6 +1,18 @@
 # 乐小读项目交接
 
-更新时间：2026-08-06
+更新时间：2026-08-10
+
+## 2026-08-10 当前运行状态（以本节为准）
+
+- 当前唯一界面是独立聊天窗口。旧悬浮窗、聊天截图、粘贴截图、框选区域和 OCR 校正入口均已删除；`capture.py`、`selection.py`、`editor.py` 及对应测试也已移除。
+- 公司原文档统一放在项目目录 `company_documents/`。顾问直接提问后，豆包先根据当前会话以及文件名/相对目录自动选择最多三份相关原文档，不需要顾问手动添加附件。
+- 选中的 PDF 以原始字节上传方舟并参与回答；乐小读本地不执行 OCR、正文提取或文本切段，回答后清理方舟临时文件。
+- DOCX、PPTX、XLSX 会参与自动选择，但当前方舟 Files API 不能直接读取。选中这些格式时会明确提示需要接通方舟文档知识库，不会静默忽略或编造公司事实。
+- 旧 `knowledge.sqlite3`、`knowledge/` 和 `artifacts/knowledge-import/` 派生数据已经删除；公司原始文件没有删除。旧知识导入源码目前仅作为历史代码保留，不参与默认聊天启动。
+- 默认启动命令：`.\.venv\python.exe -m lexiaodu`。`.env` 需包含 `LEXIAODU_GENERATOR=doubao`、`ARK_BASE_URL`、`ARK_MODEL` 和 `ARK_API_KEY`。
+- 当前相关检查为 33 passed；测试临时目录需使用 `--basetemp=E:\Project\ledu_project\.pytest-tmp`，项目旧 `artifacts/pytest` 路径在当前沙箱身份下不可写。
+
+以下 2026-08-06 及更早内容仅为历史归档，其中关于截图/OCR 界面、旧本地知识库和离线助手默认入口的描述已经失效。
 
 ## 2026-08-06 教师正式公开资料确认与知识升级（已完成）
 

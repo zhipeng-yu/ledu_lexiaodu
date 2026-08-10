@@ -7,7 +7,6 @@ from PySide6.QtGui import QCloseEvent, QInputMethodEvent, QKeyEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,
-    QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -164,9 +163,6 @@ class ChatMainWindow(QMainWindow):
     search_requested = Signal(str)
     send_requested = Signal(str)
     retry_requested = Signal(str)
-    capture_requested = Signal()
-    paste_requested = Signal()
-    document_selected = Signal(str)
     generate_reply_requested = Signal(str)
     open_drawer_requested = Signal(str)
     feedback_submitted = Signal(object)
@@ -293,8 +289,6 @@ class ChatMainWindow(QMainWindow):
                 padding: 8px 16px;
                 font-weight: 700;
             }
-            QPushButton#captureScreenshot, QPushButton#pasteScreenshot,
-            QPushButton#addOriginalDocument,
             QPushButton#generateReply, QPushButton#openContextDrawer,
             QPushButton#retryRequest {
                 background: #ffffff;
@@ -436,18 +430,6 @@ class ChatMainWindow(QMainWindow):
 
         actions = QHBoxLayout()
         actions.setSpacing(7)
-        capture = QPushButton("框选截图")
-        capture.setObjectName("captureScreenshot")
-        capture.clicked.connect(self.capture_requested.emit)
-        actions.addWidget(capture)
-        paste = QPushButton("粘贴截图")
-        paste.setObjectName("pasteScreenshot")
-        paste.clicked.connect(self.paste_requested.emit)
-        actions.addWidget(paste)
-        document = QPushButton("添加 PDF")
-        document.setObjectName("addOriginalDocument")
-        document.clicked.connect(self._choose_original_pdf)
-        actions.addWidget(document)
         generate = QPushButton("生成正式回复")
         generate.setObjectName("generateReply")
         generate.setEnabled(False)
@@ -594,16 +576,6 @@ class ChatMainWindow(QMainWindow):
         conversation_id = self._selected_conversation_id()
         if conversation_id:
             self.generate_reply_requested.emit(conversation_id)
-
-    def _choose_original_pdf(self) -> None:
-        path, _selected_filter = QFileDialog.getOpenFileName(
-            self,
-            "添加公司原文档",
-            "",
-            "PDF 原文档 (*.pdf)",
-        )
-        if path:
-            self.document_selected.emit(path)
 
     def _request_open_drawer(self) -> None:
         conversation_id = self._selected_conversation_id()

@@ -1,18 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from concurrent.futures import CancelledError, Executor, Future
-from dataclasses import replace
-from pathlib import Path
+from concurrent.futures import Executor, Future
 from typing import Protocol
 from uuid import uuid4
 
 from PySide6.QtCore import QObject, Signal, Slot
-from PySide6.QtGui import QGuiApplication, QImage
 from PySide6.QtWidgets import QInputDialog, QMessageBox
 
 from lexiaodu.attachments import AttachmentCorrupt, AttachmentStore
-from lexiaodu.capture import ScreenCapture
 from lexiaodu.chat_window import (
     ChatConversationView,
     ChatMainWindow,
@@ -20,10 +15,6 @@ from lexiaodu.chat_window import (
 )
 from lexiaodu.context import ContextBuilder, ContextPackage
 from lexiaodu.conversations import ConversationRepository, Message
-from lexiaodu.domain import ScreenRegion
-from lexiaodu.editor import TranscriptEditor
-from lexiaodu.ocr import OcrEngine, OcrError, TranscriptLine
-from lexiaodu.selection import SelectionOverlay
 
 
 class ConversationAssistant(Protocol):
@@ -31,10 +22,9 @@ class ConversationAssistant(Protocol):
 
 
 class ChatController(QObject):
-    """Orchestrate persistence, assistant work, and screenshot drafts."""
+    """Orchestrate persistence and assistant work."""
 
     _assistant_completed = Signal(object)
-    _ocr_completed = Signal(object)
 
     def __init__(
         self,
@@ -43,14 +33,7 @@ class ChatController(QObject):
         attachments: AttachmentStore,
         context_builder: ContextBuilder,
         assistant: ConversationAssistant,
-        capture: ScreenCapture,
-        ocr: OcrEngine,
-        selector_factory: Callable[[], SelectionOverlay],
-        editor_factory: Callable[
-            [Sequence[TranscriptLine], str], TranscriptEditor
-        ],
         assistant_executor: Executor,
-        ocr_executor: Executor,
     ) -> None:
         super().__init__(window)
         self._window = window
@@ -58,21 +41,10 @@ class ChatController(QObject):
         self._attachments = attachments
         self._context_builder = context_builder
         self._assistant = assistant
-        self._capture = capture
-        self._ocr = ocr
-        self._selector_factory = selector_factory
-        self._editor_factory = editor_factory
         self._assistant_executor = assistant_executor
-        self._ocr_executor = ocr_executor
-        self._selector: SelectionOverlay | None = None
-        self._editor: TranscriptEditor | None = None
-        self._capture_request_id: str | None = None
-        self._pending_documents: dict[str, Path] = {}
-        self._request_documents: dict[str, tuple[Path, ...]] = {}
         self._shutting_down = False
 
         self._assistant_completed.connect(self._handle_assistant_completion)
-        self._ocr_completed.connect(self._handle_ocr_completion)
         window.create_conversation_requested.connect(self.create_conversation)
         window.conversation_selected.connect(self.show_conversation)
         window.rename_conversation_requested.connect(self.rename_conversation)
@@ -80,12 +52,8 @@ class ChatController(QObject):
         window.search_requested.connect(self.search_conversations)
         window.send_requested.connect(self.send_message)
         window.retry_requested.connect(self.retry_request)
-        window.capture_requested.connect(self.start_capture)
-        window.paste_requested.connect(self.paste_screenshot)
-        window.document_selected.connect(self.select_original_document)
 
         self._refresh_conversations()
-        self._ocr_executor.submit(self._preload_ocr)
 
     def _refresh_conversations(
         self,
@@ -189,34 +157,11 @@ class ChatController(QObject):
         body = text.strip()
         if conversation_id is None or not body or self._shutting_down:
             return
-        document = self._pending_documents.pop(conversation_id, None)
-        documents = (document,) if document is not None else ()
-        if document is not None:
-            body = f"{body}\n\n[原文档：{document.name}]"
         self._start_new_request(
             conversation_id,
             body,
             request_id=uuid4().hex,
             kind="text",
-            original_documents=documents,
-        )
-
-    @Slot(str)
-    def select_original_document(self, path_text: str) -> None:
-        conversation_id = self._window.active_conversation_id
-        if conversation_id is None or self._shutting_down:
-            return
-        path = Path(path_text).resolve()
-        if path.suffix.casefold() != ".pdf" or not path.is_file():
-            QMessageBox.information(
-                self._window,
-                "添加原文档",
-                "当前请选择 PDF 原文档。",
-            )
-            return
-        self._pending_documents[conversation_id] = path
-        self._window.append_tool_activity(
-            f"已选择原文档：{path.name}（随下一条问题发送）"
         )
 
     def _start_new_request(
@@ -226,7 +171,6 @@ class ChatController(QObject):
         *,
         request_id: str,
         kind: str,
-        original_documents: tuple[Path, ...] = (),
     ) -> None:
         self._repository.append_user_message(
             conversation_id,
@@ -235,12 +179,7 @@ class ChatController(QObject):
             kind=kind,
         )
         self._show_if_active(conversation_id)
-        self._dispatch_request(
-            conversation_id,
-            request_id,
-            body,
-            original_documents=original_documents,
-        )
+        self._dispatch_request(conversation_id, request_id, body)
 
     @Slot(str)
     def retry_request(self, request_id: str) -> None:
@@ -259,24 +198,15 @@ class ChatController(QObject):
         )
         if request is None:
             return
-        self._dispatch_request(
-            conversation_id,
-            request_id,
-            request.body,
-            original_documents=self._request_documents.get(request_id, ()),
-        )
+        self._dispatch_request(conversation_id, request_id, request.body)
 
     def _dispatch_request(
         self,
         conversation_id: str,
         request_id: str,
         body: str,
-        *,
-        original_documents: tuple[Path, ...] = (),
     ) -> None:
         try:
-            if original_documents:
-                self._request_documents[request_id] = original_documents
             request = self._repository.mark_request_processing(
                 conversation_id,
                 request_id,
@@ -284,11 +214,6 @@ class ChatController(QObject):
             if request.processing_status == "completed":
                 return
             context = self._context_builder.build(conversation_id, body)
-            if original_documents:
-                context = replace(
-                    context,
-                    original_documents=original_documents,
-                )
             future = self._assistant_executor.submit(
                 self._assistant.respond,
                 context,
@@ -318,7 +243,6 @@ class ChatController(QObject):
                 body,
                 in_reply_to_request_id=request_id,
             )
-            self._request_documents.pop(request_id, None)
         except Exception:
             self._fail_request(conversation_id, request_id)
             return
@@ -339,257 +263,8 @@ class ChatController(QObject):
             self.show_conversation(conversation_id)
 
     @Slot()
-    def start_capture(self) -> None:
-        conversation_id = self._window.active_conversation_id
-        if (
-            conversation_id is None
-            or self._selector is not None
-            or self._editor is not None
-            or self._capture_request_id is not None
-            or self._shutting_down
-        ):
-            return
-        request_id = uuid4().hex
-        self._capture_request_id = request_id
-        try:
-            selector = self._selector_factory()
-        except Exception:
-            self._release_capture(request_id)
-            return
-        self._selector = selector
-        selector.region_selected.connect(
-            lambda region,
-            owner=conversation_id,
-            owner_request=request_id: self._capture_region(
-                owner,
-                owner_request,
-                region,
-            )
-        )
-        selector.cancelled.connect(
-            lambda owner_request=request_id: self._cancel_capture(
-                owner_request
-            )
-        )
-        try:
-            selector.start()
-        except Exception:
-            self._dispose_selector()
-            self._release_capture(request_id)
-
-    @Slot()
-    def paste_screenshot(self) -> None:
-        conversation_id = self._window.active_conversation_id
-        if (
-            conversation_id is None
-            or self._selector is not None
-            or self._editor is not None
-            or self._capture_request_id is not None
-            or self._shutting_down
-        ):
-            return
-        image = QGuiApplication.clipboard().image()
-        if image.isNull():
-            QMessageBox.information(
-                self._window,
-                "粘贴截图",
-                "剪贴板中没有可用图片。",
-            )
-            return
-        request_id = uuid4().hex
-        self._capture_request_id = request_id
-        self._start_image_ocr(conversation_id, request_id, image)
-
-    def _cancel_capture(self, request_id: str) -> None:
-        if self._capture_request_id != request_id:
-            return
-        self._dispose_selector()
-        self._release_capture(request_id)
-
-    def _release_capture(self, request_id: str) -> None:
-        if self._capture_request_id == request_id:
-            self._capture_request_id = None
-
-    def _dispose_selector(self) -> None:
-        if self._selector is None:
-            return
-        selector = self._selector
-        self._selector = None
-        selector.hide()
-        selector.deleteLater()
-
-    def _capture_region(
-        self,
-        conversation_id: str,
-        request_id: str,
-        region: ScreenRegion,
-    ) -> None:
-        if (
-            self._shutting_down
-            or self._capture_request_id != request_id
-        ):
-            return
-        self._dispose_selector()
-        try:
-            result = self._capture.capture(region)
-        except Exception:
-            self._release_capture(request_id)
-            return
-        self._start_image_ocr(conversation_id, request_id, result.image)
-
-    def _start_image_ocr(
-        self,
-        conversation_id: str,
-        request_id: str,
-        image: QImage,
-    ) -> None:
-        try:
-            attachment = self._attachments.save_image(conversation_id, image)
-        except Exception:
-            self._release_capture(request_id)
-            return
-        try:
-            future = self._ocr_executor.submit(
-                self._ocr.recognize,
-                image,
-            )
-        except Exception:
-            self._release_capture(request_id)
-            return
-        future.add_done_callback(
-            lambda completed,
-            owner=conversation_id,
-            owner_request=request_id,
-            attachment_id=attachment.id: self._ocr_completed.emit(
-                (owner, owner_request, attachment_id, completed)
-            )
-        )
-
-    @Slot(object)
-    def _handle_ocr_completion(
-        self,
-        result: tuple[str, str, str, Future[list[TranscriptLine]]],
-    ) -> None:
-        conversation_id, request_id, attachment_id, future = result
-        if (
-            self._shutting_down
-            or self._capture_request_id != request_id
-        ):
-            return
-        try:
-            lines = future.result()
-            notice = "请核对 OCR 文字和发言人。"
-        except CancelledError:
-            self._release_capture(request_id)
-            return
-        except OcrError as exc:
-            lines = []
-            notice = f"{exc}。请在下方手动粘贴文字。"
-        except Exception as exc:
-            lines = []
-            notice = f"OCR 识别失败：{exc}。请在下方手动粘贴文字。"
-        try:
-            editor = self._editor_factory(lines, notice)
-            self._editor = editor
-            editor.accepted.connect(
-                lambda owner=conversation_id,
-                owner_request=request_id,
-                owner_attachment=attachment_id,
-                current_editor=editor: self._accept_editor(
-                    owner,
-                    owner_request,
-                    owner_attachment,
-                    current_editor,
-                )
-            )
-            editor.finished.connect(
-                lambda _result,
-                owner_request=request_id,
-                current_editor=editor: self._release_editor(
-                    current_editor,
-                    owner_request,
-                )
-            )
-            editor.show()
-        except Exception:
-            self._dispose_editor()
-            self._release_capture(request_id)
-
-    def _accept_editor(
-        self,
-        conversation_id: str,
-        request_id: str,
-        attachment_id: str,
-        editor: TranscriptEditor,
-    ) -> None:
-        try:
-            self._accept_correction(
-                conversation_id,
-                request_id,
-                attachment_id,
-                editor,
-            )
-        finally:
-            self._release_editor(editor, request_id)
-
-    def _release_editor(
-        self,
-        editor: TranscriptEditor,
-        request_id: str,
-    ) -> None:
-        if self._editor is editor:
-            self._editor = None
-            self._release_capture(request_id)
-
-    def _accept_correction(
-        self,
-        conversation_id: str,
-        request_id: str,
-        attachment_id: str,
-        editor: TranscriptEditor,
-    ) -> None:
-        if self._shutting_down:
-            return
-        corrected_text = editor.corrected_transcript().text.strip()
-        if not corrected_text:
-            return
-        self._attachments.save_corrected_text(
-            conversation_id,
-            attachment_id,
-            corrected_text,
-        )
-        self._start_new_request(
-            conversation_id,
-            corrected_text,
-            request_id=request_id,
-            kind="screenshot",
-        )
-
-    def _preload_ocr(self) -> None:
-        try:
-            self._ocr.preload()
-        except OcrError:
-            pass
-
-    def _dispose_editor(self) -> None:
-        if self._editor is None:
-            return
-        editor = self._editor
-        self._editor = None
-        try:
-            editor.close()
-            editor.deleteLater()
-        except RuntimeError:
-            # WA_DeleteOnClose may already have deleted an accepted editor.
-            pass
-
-    @Slot()
     def shutdown(self) -> None:
         if self._shutting_down:
             return
         self._shutting_down = True
-        self._capture_request_id = None
-        self._dispose_selector()
-        self._dispose_editor()
         self._assistant_executor.shutdown(wait=True, cancel_futures=True)
-        self._ocr_executor.shutdown(wait=True, cancel_futures=True)

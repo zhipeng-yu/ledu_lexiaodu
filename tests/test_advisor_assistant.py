@@ -52,6 +52,23 @@ class FakeResponses:
         return SimpleNamespace(output_text="这份原文档建议先确认孩子当前阅读水平。")
 
 
+class RoutingCompletions:
+    def __init__(self) -> None:
+        self.options = None
+
+    def create(self, **options):
+        self.options = options
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content='{"files":["课程说明.pdf"]}'
+                    )
+                )
+            ]
+        )
+
+
 def test_doubao_assistant_uses_conversation_context_as_primary_chat() -> None:
     completions = FakeCompletions()
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
@@ -80,21 +97,26 @@ def test_doubao_assistant_uses_conversation_context_as_primary_chat() -> None:
     assert "不要编造" in system
 
 
-def test_doubao_assistant_sends_original_pdf_without_local_extraction(tmp_path) -> None:
-    pdf = tmp_path / "课程说明.pdf"
+def test_doubao_automatically_selects_and_sends_original_pdf(tmp_path) -> None:
+    document_dir = tmp_path / "company_documents"
+    document_dir.mkdir()
+    pdf = document_dir / "课程说明.pdf"
     raw = b"%PDF-1.4 original bytes"
     pdf.write_bytes(raw)
     files = FakeFiles()
     responses = FakeResponses()
+    routing = RoutingCompletions()
     client = SimpleNamespace(
         files=files,
         responses=responses,
-        chat=SimpleNamespace(completions=FakeCompletions()),
+        chat=SimpleNamespace(completions=routing),
     )
-    assistant = OpenAIConversationAssistant(client, "doubao-test")
-    context = ContextPackage(
-        (), None, (), (), (), 1, original_documents=(pdf,)
+    assistant = OpenAIConversationAssistant(
+        client,
+        "doubao-test",
+        document_dir=document_dir,
     )
+    context = ContextPackage((), None, (), (), (), 1)
 
     answer = assistant.respond(context, "request-1")
 
@@ -103,3 +125,4 @@ def test_doubao_assistant_sends_original_pdf_without_local_extraction(tmp_path) 
     assert files.deleted == ["file-1"]
     content = responses.options["input"][0]["content"]
     assert content[0] == {"type": "input_file", "file_id": "file-1"}
+    assert "课程说明.pdf" in routing.options["messages"][1]["content"]

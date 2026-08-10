@@ -8,7 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtCore import QEvent, QTimer
 from PySide6.QtGui import QColor, QFont, QImage
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication
 
 from lexiaodu.app import (
     OfflineDemoAssistant,
@@ -33,26 +33,6 @@ from lexiaodu.local_crypto import DataCipher
 
 
 _APPLICATION: QApplication | None = None
-
-
-class _RecordingAuxiliaryWidget(QWidget):
-    def __init__(self) -> None:
-        super().__init__()
-        self.closed = False
-        self.hidden = False
-        self.deleted_later = False
-
-    def close(self) -> bool:
-        self.closed = True
-        return super().close()
-
-    def hide(self) -> None:
-        self.hidden = True
-        super().hide()
-
-    def deleteLater(self) -> None:
-        self.deleted_later = True
-        super().deleteLater()
 
 
 def _application() -> QApplication:
@@ -183,11 +163,6 @@ def test_build_generator_configures_doubao_client(monkeypatch) -> None:
     }
 
 
-class _InertOcr:
-    def preload(self) -> None:
-        pass
-
-
 def _runtime_settings(tmp_path) -> AppSettings:
     return AppSettings(
         ocr=OcrSettings(tmp_path / "ocr-cache"),
@@ -203,7 +178,7 @@ def _runtime_settings(tmp_path) -> AppSettings:
     )
 
 
-def test_build_chat_runtime_shows_chat_window_with_independent_single_workers(
+def test_build_chat_runtime_shows_chat_window_with_single_assistant_worker(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -213,19 +188,12 @@ def test_build_chat_runtime_shows_chat_window_with_independent_single_workers(
         "lexiaodu.app.DataCipher.open",
         lambda _path: DataCipher(b"c" * 32),
     )
-    monkeypatch.setattr(
-        "lexiaodu.app.PaddleOcrEngine",
-        lambda _path: _InertOcr(),
-    )
-
     runtime = build_chat_runtime(_runtime_settings(tmp_path), OfflineDemoAssistant())
 
     try:
         assert isinstance(runtime.window, ChatMainWindow)
         assert runtime.window.isVisible()
-        assert runtime.assistant_executor is not runtime.ocr_executor
         assert runtime.assistant_executor._max_workers == 1
-        assert runtime.ocr_executor._max_workers == 1
     finally:
         runtime.controller.shutdown()
         runtime.window.close()
@@ -241,17 +209,7 @@ def test_closing_default_chat_quits_event_loop_and_shuts_down_workers(
         "lexiaodu.app.DataCipher.open",
         lambda _path: DataCipher(b"c" * 32),
     )
-    monkeypatch.setattr(
-        "lexiaodu.app.PaddleOcrEngine",
-        lambda _path: _InertOcr(),
-    )
     runtime = build_chat_runtime(_runtime_settings(tmp_path), OfflineDemoAssistant())
-    active_editor = _RecordingAuxiliaryWidget()
-    active_selector = _RecordingAuxiliaryWidget()
-    active_editor.show()
-    active_selector.show()
-    runtime.controller._editor = active_editor
-    runtime.controller._selector = active_selector
     watchdog = QTimer()
     watchdog.setSingleShot(True)
     timed_out: list[bool] = []
@@ -272,14 +230,8 @@ def test_closing_default_chat_quits_event_loop_and_shuts_down_workers(
         runtime.window.close()
 
     assert timed_out == []
-    assert active_editor.closed
-    assert active_editor.deleted_later
-    assert active_selector.hidden
-    assert active_selector.deleted_later
     with pytest.raises(RuntimeError):
         runtime.assistant_executor.submit(lambda: None)
-    with pytest.raises(RuntimeError):
-        runtime.ocr_executor.submit(lambda: None)
 
 
 def test_chat_startup_replays_pending_attachment_cleanup_idempotently_and_scoped(
@@ -290,10 +242,6 @@ def test_chat_startup_replays_pending_attachment_cleanup_idempotently_and_scoped
     settings = _runtime_settings(tmp_path)
     cipher = DataCipher(b"c" * 32)
     monkeypatch.setattr("lexiaodu.app.DataCipher.open", lambda _path: cipher)
-    monkeypatch.setattr(
-        "lexiaodu.app.PaddleOcrEngine",
-        lambda _path: _InertOcr(),
-    )
     repository = ConversationRepository(settings.chat.database_path, cipher)
     attachments = AttachmentStore(
         settings.chat.attachment_dir,
