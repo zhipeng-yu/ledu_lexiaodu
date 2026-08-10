@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Produce an evidence-backed, format-by-format go/no-go decision for sending unchanged PDF, DOCX, and PPTX source files through the enabled Volcano Ark account and model endpoint before any production advisor path depends on it.
+**Goal:** Produce an evidence-backed, format-by-format go/no-go decision for sending unchanged PDF, DOCX, PPTX, and XLSX source files through the enabled Volcano Ark account and model endpoint before any production advisor path depends on it.
 
 **Architecture:** Build an offline-tested probe harness around a narrow transport protocol, then bind that protocol to the exact Ark file or document-knowledge endpoint confirmed by the current official documentation and test account. The live probe hashes every local input before and after use, asks locator-specific questions against a controlled corpus, records machine-readable results without document contents, and generates a redacted compatibility report. This plan ends at the capability gate and does not modify the production answer flow.
 
@@ -10,13 +10,13 @@
 
 ## Global Constraints
 
-- Start only after the company supplies approved non-production PDF, DOCX, and PPTX samples and a test Ark account/model with file capability.
+- Start only after the company supplies or approves non-production PDF, DOCX, PPTX, and XLSX samples and a test Ark account/model with file capability.
 - Never use real parent chats, student records, employee directories, production prices, or secrets in the probe corpus.
 - Do not extract, OCR, convert, rewrite, unzip, or chunk source documents locally. The probe may read bytes only to hash and upload them.
 - Do not infer API payloads from memory. Before implementing the live transport, record the current official URL, endpoint, SDK method, supported formats, size limits, retention/deletion behavior, and account permission in the report.
 - Keep `ARK_API_KEY` only in ignored local environment configuration. Never print it or serialize request headers.
 - Store private samples and raw service responses only under ignored `artifacts/ark-original-file-probe/`; commit only schemas, scripts, tests, and redacted aggregate results approved for source control.
-- Treat PDF, DOCX, and PPTX independently. One supported format does not authorize another.
+- Treat PDF, DOCX, PPTX, and XLSX independently. One supported format does not authorize another.
 - Do not silently convert legacy `.doc` or `.ppt`; leave them unsupported unless the verified Ark endpoint explicitly accepts them unchanged.
 - A file-format result is `GO` only when upload/read, locator quality, reuse, timeout, deletion/retention, and privacy checks all pass.
 - Use the project-local `.venv` for every Python command.
@@ -93,7 +93,7 @@ Validate extensions against the manifest, stream SHA-256 without reading documen
 
 - [ ] **Step 5: Seed the report decision table**
 
-Create the report with `NOT_RUN` rows for PDF, DOCX, and PPTX plus sections for official API evidence, account permissions, retention/deletion, sample approval, per-format metrics, observed limitations, and signed decision. `NOT_RUN` must be visibly different from `NO_GO` and `GO`.
+Create the report with `NOT_RUN` rows for PDF, DOCX, PPTX, and XLSX plus sections for official API evidence, account permissions, retention/deletion, sample approval, per-format metrics, observed limitations, and signed decision. `NOT_RUN` must be visibly different from `NO_GO` and `GO`.
 
 - [ ] **Step 6: Run GREEN and commit**
 
@@ -119,7 +119,7 @@ In the non-production Ark account, confirm the exact region, base URL, endpoint/
 
 - [ ] **Step 3: Choose exactly one transport per target format**
 
-For each of PDF, DOCX, and PPTX, choose the direct File API only if the current endpoint accepts that format unchanged and can attach it to inference. Otherwise choose the official document-knowledge upload/query path for that format. Record the chosen and rejected paths and reasons. If neither path satisfies unchanged upload, locators, and deletion/retention requirements, set that format to `NO_GO` and stop its production integration. Prefer one shared transport where capability is equal, but do not reject a supported format merely because another verified Ark transport is required.
+For each of PDF, DOCX, PPTX, and XLSX, choose the direct File API only if the current endpoint accepts that format unchanged and can attach it to inference. Otherwise choose the official document-knowledge upload/query path for that format. Record the chosen and rejected paths and reasons. If neither path satisfies unchanged upload, locators, and deletion/retention requirements, set that format to `NO_GO` and stop its production integration. Prefer one shared transport where capability is equal, but do not reject a supported format merely because another verified Ark transport is required.
 
 - [ ] **Step 4: Review the evidence checkpoint**
 
