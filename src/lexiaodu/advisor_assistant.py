@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .context import ContextPackage
+from .chat_context import ContextPackage
 
 
 class AdvisorAssistantError(RuntimeError):
@@ -180,7 +180,10 @@ _SYSTEM_PROMPT = (
     "你是乐小读，直接和公司顾问讨论家长顾虑。"
     "你可以独立分析、判断并自然追问，但一次最多追问一个关键问题。"
     "公司事实只能来自明确提供的公司原文档；当前上下文没有依据时，"
-    "要说明待核实，不要编造。不要假装已经把消息发送给家长。"
+    "要说明待核实，不要编造。引用公司事实时标明文件名，能够识别页码或章节时一并标明。"
+    "课程名额、订单、付款和 App 显示等实时状态必须请顾问查询业务系统。"
+    "涉及退款、投诉、法律、人身安全、健康、隐私或儿童保护时，不作确定承诺，提示人工核实。"
+    "不要假装已经把消息发送给家长。"
 )
 
 _SUPPORTED_FORMATS = frozenset({".pdf", ".docx", ".pptx", ".xlsx"})

@@ -7,14 +7,13 @@ from uuid import uuid4
 from PySide6.QtCore import QObject, Signal, Slot
 from PySide6.QtWidgets import QInputDialog, QMessageBox
 
-from lexiaodu.attachments import AttachmentCorrupt, AttachmentStore
 from lexiaodu.chat_window import (
     ChatConversationView,
     ChatMainWindow,
     ChatTurnView,
 )
-from lexiaodu.context import ContextBuilder, ContextPackage
-from lexiaodu.conversations import ConversationRepository, Message
+from lexiaodu.chat_context import ContextBuilder, ContextPackage
+from lexiaodu.chat_repository import ConversationRepository, Message
 
 
 class ConversationAssistant(Protocol):
@@ -30,7 +29,6 @@ class ChatController(QObject):
         self,
         window: ChatMainWindow,
         repository: ConversationRepository,
-        attachments: AttachmentStore,
         context_builder: ContextBuilder,
         assistant: ConversationAssistant,
         assistant_executor: Executor,
@@ -38,7 +36,6 @@ class ChatController(QObject):
         super().__init__(window)
         self._window = window
         self._repository = repository
-        self._attachments = attachments
         self._context_builder = context_builder
         self._assistant = assistant
         self._assistant_executor = assistant_executor
@@ -104,15 +101,11 @@ class ChatController(QObject):
         answer = QMessageBox.question(
             self._window,
             "删除会话",
-            "确认删除这个会话及其本地附件吗？",
+            "确认删除这个会话吗？",
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
         self._repository.delete_conversation(conversation_id)
-        try:
-            self._attachments.run_cleanup_jobs(conversation_id)
-        except (OSError, AttachmentCorrupt):
-            pass
         self._refresh_conversations()
 
     @Slot(str)
@@ -138,8 +131,6 @@ class ChatController(QObject):
             conversation_id,
             tuple(self._turn_view(message) for message in messages),
         )
-        for reply_card in self._repository.list_reply_cards(conversation_id):
-            self._window.append_suggestion(reply_card.suggestion)
 
     @staticmethod
     def _turn_view(message: Message) -> ChatTurnView:
@@ -213,7 +204,7 @@ class ChatController(QObject):
             )
             if request.processing_status == "completed":
                 return
-            context = self._context_builder.build(conversation_id, body)
+            context = self._context_builder.build(conversation_id)
             future = self._assistant_executor.submit(
                 self._assistant.respond,
                 context,

@@ -20,10 +20,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from lexiaodu.advice import AdviceSuggestion
-from lexiaodu.chat import SuggestionCard
-
-
 @dataclass(frozen=True, slots=True)
 class ChatConversationView:
     id: str
@@ -115,9 +111,9 @@ class _TimelineTurn(QFrame):
         if turn.kind == "tool":
             role_text = "本地工具"
         elif turn.role == "user":
-            role_text = "家长问题"
+            role_text = "顾问"
         else:
-            role_text = "顾问助手"
+            role_text = "乐小读"
         role = QLabel(role_text)
         role.setObjectName("turnRole")
         layout.addWidget(role)
@@ -163,16 +159,13 @@ class ChatMainWindow(QMainWindow):
     search_requested = Signal(str)
     send_requested = Signal(str)
     retry_requested = Signal(str)
-    generate_reply_requested = Signal(str)
-    open_drawer_requested = Signal(str)
-    feedback_submitted = Signal(object)
     close_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
         self._active_conversation_id: str | None = None
         self.setObjectName("chatMainWindow")
-        self.setWindowTitle("乐学岛 · 家长沟通顾问")
+        self.setWindowTitle("乐小读 · 家长沟通顾问")
         self.resize(1180, 760)
 
         root = QWidget()
@@ -184,7 +177,6 @@ class ChatMainWindow(QMainWindow):
 
         root_layout.addWidget(self._build_sidebar())
         root_layout.addWidget(self._build_chat_region(), 1)
-        root_layout.addWidget(self._build_drawer())
 
         self.setStyleSheet(
             """
@@ -289,7 +281,6 @@ class ChatMainWindow(QMainWindow):
                 padding: 8px 16px;
                 font-weight: 700;
             }
-            QPushButton#generateReply, QPushButton#openContextDrawer,
             QPushButton#retryRequest {
                 background: #ffffff;
                 color: #31534d;
@@ -297,12 +288,6 @@ class ChatMainWindow(QMainWindow):
                 border-radius: 5px;
                 padding: 7px 10px;
             }
-            QFrame#contextDrawer {
-                background: #fbfaf6;
-                border-left: 1px solid #d8d3c7;
-            }
-            QLabel#drawerTitle { color: #24312f; font-weight: 700; }
-            QLabel#drawerBody { color: #596460; }
             """
         )
 
@@ -392,12 +377,6 @@ class ChatMainWindow(QMainWindow):
         headings.addWidget(subheading)
         header_layout.addLayout(headings)
         header_layout.addStretch()
-        drawer = QPushButton("会话资料")
-        drawer.setObjectName("openContextDrawer")
-        drawer.setEnabled(False)
-        drawer.setToolTip("暂不可用：当前没有会话资料来源")
-        drawer.clicked.connect(self._request_open_drawer)
-        header_layout.addWidget(drawer)
         layout.addWidget(header)
 
         self._timeline = QListWidget()
@@ -430,12 +409,6 @@ class ChatMainWindow(QMainWindow):
 
         actions = QHBoxLayout()
         actions.setSpacing(7)
-        generate = QPushButton("生成正式回复")
-        generate.setObjectName("generateReply")
-        generate.setEnabled(False)
-        generate.setToolTip("离线模式暂不支持生成正式回复")
-        generate.clicked.connect(self._request_generate_reply)
-        actions.addWidget(generate)
         actions.addStretch()
         hint = QLabel("Enter 发送 · Shift+Enter 换行")
         hint.setObjectName("composerHint")
@@ -447,26 +420,6 @@ class ChatMainWindow(QMainWindow):
         composer_layout.addLayout(actions)
         layout.addWidget(composer_panel)
         return region
-
-    def _build_drawer(self) -> QFrame:
-        self._drawer = QFrame()
-        self._drawer.setObjectName("contextDrawer")
-        self._drawer.setMinimumWidth(260)
-        self._drawer.setMaximumWidth(340)
-        layout = QVBoxLayout(self._drawer)
-        layout.setContentsMargins(18, 20, 18, 18)
-        layout.setSpacing(10)
-        title = QLabel("会话资料")
-        title.setObjectName("drawerTitle")
-        layout.addWidget(title)
-        body = QLabel("附件、已确认事实与上下文摘要会显示在这里。")
-        body.setObjectName("drawerBody")
-        body.setTextFormat(Qt.TextFormat.PlainText)
-        body.setWordWrap(True)
-        layout.addWidget(body)
-        layout.addStretch()
-        self._drawer.hide()
-        return self._drawer
 
     def set_conversations(
         self, conversations: tuple[ChatConversationView, ...]
@@ -489,7 +442,6 @@ class ChatMainWindow(QMainWindow):
         else:
             self._active_conversation_id = None
             self._timeline.clear()
-            self._drawer.hide()
         del blocker
 
     def select_conversation(self, conversation_id: str) -> bool:
@@ -521,18 +473,6 @@ class ChatMainWindow(QMainWindow):
             return False
         self.append_turn(ChatTurnView("", "tool", activity, kind="tool"))
         return True
-
-    @Slot(object)
-    def append_suggestion(self, suggestion: AdviceSuggestion) -> bool:
-        if not isinstance(suggestion, AdviceSuggestion):
-            return False
-        card = SuggestionCard(suggestion, show_feedback=False)
-        card.feedback_submitted.connect(self.feedback_submitted.emit)
-        self._append_timeline_widget(card)
-        return True
-
-    def set_drawer_visible(self, visible: bool) -> None:
-        self._drawer.setVisible(visible)
 
     @Slot()
     def submit_composer(self) -> bool:
@@ -571,16 +511,6 @@ class ChatMainWindow(QMainWindow):
         conversation_id = self._selected_conversation_id()
         if conversation_id:
             self.delete_conversation_requested.emit(conversation_id)
-
-    def _request_generate_reply(self) -> None:
-        conversation_id = self._selected_conversation_id()
-        if conversation_id:
-            self.generate_reply_requested.emit(conversation_id)
-
-    def _request_open_drawer(self) -> None:
-        conversation_id = self._selected_conversation_id()
-        if conversation_id:
-            self.open_drawer_requested.emit(conversation_id)
 
     def _selected_conversation_id(self) -> str | None:
         item = self._conversations.currentItem()

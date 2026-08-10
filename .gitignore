@@ -16,7 +16,7 @@ dist/
 .env.*
 !.env.example
 
-# Runtime artifacts (screenshots, logs)
+# Runtime and test artifacts
 artifacts/
 *.log
 data/

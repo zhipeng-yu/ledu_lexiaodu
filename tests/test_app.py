@@ -7,28 +7,22 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QEvent, QTimer
-from PySide6.QtGui import QColor, QFont, QImage
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication
 
 from lexiaodu.app import (
     OfflineDemoAssistant,
-    _build_generator_from_environment,
+    _build_conversation_assistant_from_environment,
     _configure_application,
+    build_parser,
     build_chat_runtime,
 )
-from lexiaodu.attachments import AttachmentStore
+from lexiaodu.advisor_assistant import OpenAIConversationAssistant
+from lexiaodu.chat_context import ContextPackage
+from lexiaodu.chat_repository import ConversationRepository
 from lexiaodu.chat_window import ChatMainWindow
-from lexiaodu.config import (
-    AppSettings,
-    ChatSettings,
-    FeedbackSettings,
-    KnowledgeSettings,
-    OcrSettings,
-)
-from lexiaodu.context import ContextPackage
-from lexiaodu.conversations import ConversationRepository
+from lexiaodu.config import AppSettings, ChatSettings
 from lexiaodu.font_scaling import ApplicationFontScaler
-from lexiaodu.generator import OpenAICompatibleGenerator, SimulatedGenerator
 from lexiaodu.local_crypto import DataCipher
 
 
@@ -49,6 +43,13 @@ def _clear_generator_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         "ARK_MODEL",
     ):
         monkeypatch.delenv(name, raising=False)
+
+
+def test_default_parser_has_no_legacy_knowledge_or_ocr_actions() -> None:
+    help_text = build_parser().format_help().casefold()
+
+    assert "knowledge" not in help_text
+    assert "ocr" not in help_text
 
 
 def test_configure_application_installs_default_font_increase() -> None:
@@ -85,12 +86,20 @@ def test_configure_application_installs_default_font_increase() -> None:
         application.processEvents()
 
 
-def test_build_generator_defaults_to_local_simulation(monkeypatch) -> None:
+def test_build_assistant_defaults_to_doubao_and_requires_credentials(monkeypatch) -> None:
     _clear_generator_environment(monkeypatch)
 
+    with pytest.raises(ValueError, match="ARK_API_KEY"):
+        _build_conversation_assistant_from_environment()
+
+
+def test_build_assistant_uses_offline_demo_only_when_explicit(monkeypatch) -> None:
+    _clear_generator_environment(monkeypatch)
+    monkeypatch.setenv("LEXIAODU_GENERATOR", "simulated")
+
     assert isinstance(
-        _build_generator_from_environment(),
-        SimulatedGenerator,
+        _build_conversation_assistant_from_environment(),
+        OfflineDemoAssistant,
     )
 
 
@@ -125,7 +134,7 @@ def test_build_generator_defaults_to_local_simulation(monkeypatch) -> None:
         ),
     ],
 )
-def test_build_generator_rejects_invalid_environment(
+def test_build_assistant_rejects_invalid_environment(
     monkeypatch,
     environment,
     message,
@@ -135,10 +144,10 @@ def test_build_generator_rejects_invalid_environment(
         monkeypatch.setenv(name, value)
 
     with pytest.raises(ValueError, match=message):
-        _build_generator_from_environment()
+        _build_conversation_assistant_from_environment()
 
 
-def test_build_generator_configures_doubao_client(monkeypatch) -> None:
+def test_build_assistant_configures_doubao_client(monkeypatch) -> None:
     _clear_generator_environment(monkeypatch)
     monkeypatch.setenv("LEXIAODU_GENERATOR", "doubao")
     monkeypatch.setenv("ARK_API_KEY", "test-key")
@@ -152,9 +161,9 @@ def test_build_generator_configures_doubao_client(monkeypatch) -> None:
 
     monkeypatch.setattr("lexiaodu.app.OpenAI", fake_openai)
 
-    generator = _build_generator_from_environment()
+    assistant = _build_conversation_assistant_from_environment()
 
-    assert isinstance(generator, OpenAICompatibleGenerator)
+    assert isinstance(assistant, OpenAIConversationAssistant)
     assert captured == {
         "api_key": "test-key",
         "base_url": "https://ark.example/api/v3",
@@ -165,15 +174,8 @@ def test_build_generator_configures_doubao_client(monkeypatch) -> None:
 
 def _runtime_settings(tmp_path) -> AppSettings:
     return AppSettings(
-        ocr=OcrSettings(tmp_path / "ocr-cache"),
-        knowledge=KnowledgeSettings(
-            tmp_path / "knowledge",
-            tmp_path / "knowledge.sqlite3",
-        ),
-        feedback=FeedbackSettings(tmp_path / "feedback.sqlite3"),
         chat=ChatSettings(
             database_path=tmp_path / "chat.sqlite3",
-            attachment_dir=tmp_path / "attachments",
         ),
     )
 
@@ -234,52 +236,8 @@ def test_closing_default_chat_quits_event_loop_and_shuts_down_workers(
         runtime.assistant_executor.submit(lambda: None)
 
 
-def test_chat_startup_replays_pending_attachment_cleanup_idempotently_and_scoped(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    _application()
-    settings = _runtime_settings(tmp_path)
-    cipher = DataCipher(b"c" * 32)
-    monkeypatch.setattr("lexiaodu.app.DataCipher.open", lambda _path: cipher)
-    repository = ConversationRepository(settings.chat.database_path, cipher)
-    attachments = AttachmentStore(
-        settings.chat.attachment_dir,
-        repository,
-        cipher,
-    )
-    deleted = repository.create_conversation("deleted cleanup scope")
-    active = repository.create_conversation("active cleanup scope")
-    image = QImage(2, 2, QImage.Format.Format_RGB32)
-    image.fill(QColor("white"))
-    deleted_attachment = attachments.save_image(deleted.id, image)
-    active_attachment = attachments.save_image(active.id, image)
-    repository.delete_conversation(deleted.id)
-
-    assert deleted_attachment.encrypted_path.exists()
-    assert len(repository.list_cleanup_jobs(deleted.id, "delete_attachment")) == 1
-
-    runtime = build_chat_runtime(settings, OfflineDemoAssistant())
-    try:
-        assert not deleted_attachment.encrypted_path.exists()
-        assert active_attachment.encrypted_path.exists()
-        assert repository.list_cleanup_jobs(deleted.id, "delete_attachment") == ()
-    finally:
-        runtime.controller.shutdown()
-        runtime.window.close()
-
-    reopened_runtime = build_chat_runtime(settings, OfflineDemoAssistant())
-    try:
-        assert not deleted_attachment.encrypted_path.exists()
-        assert active_attachment.encrypted_path.exists()
-        assert repository.list_cleanup_jobs(deleted.id, "delete_attachment") == ()
-    finally:
-        reopened_runtime.controller.shutdown()
-        reopened_runtime.window.close()
-
-
 def test_offline_demo_assistant_discloses_limits_without_company_facts() -> None:
-    context = ContextPackage((), None, (), (), (), 1)
+    context = ContextPackage((), 1)
 
     answer = OfflineDemoAssistant().respond(context, "request-id")
 

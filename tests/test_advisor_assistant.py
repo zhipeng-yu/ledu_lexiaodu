@@ -4,8 +4,8 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 from lexiaodu.advisor_assistant import OpenAIConversationAssistant
-from lexiaodu.context import ContextPackage
-from lexiaodu.conversations import Message
+from lexiaodu.chat_context import ContextPackage
+from lexiaodu.chat_repository import Message
 
 
 class FakeCompletions:
@@ -84,7 +84,7 @@ def test_doubao_assistant_uses_conversation_context_as_primary_chat() -> None:
         processing_status="processing",
         created_at=datetime.now(UTC),
     )
-    context = ContextPackage((), None, (message,), (), (), 1)
+    context = ContextPackage((message,), 1)
 
     answer = assistant.respond(context, "request-1")
 
@@ -95,6 +95,9 @@ def test_doubao_assistant_uses_conversation_context_as_primary_chat() -> None:
     assert "顾问" in system
     assert "公司事实" in system
     assert "不要编造" in system
+    assert "业务系统" in system
+    assert "退款" in system
+    assert "文件名" in system
 
 
 def test_doubao_automatically_selects_and_sends_original_pdf(tmp_path) -> None:
@@ -116,7 +119,7 @@ def test_doubao_automatically_selects_and_sends_original_pdf(tmp_path) -> None:
         "doubao-test",
         document_dir=document_dir,
     )
-    context = ContextPackage((), None, (), (), (), 1)
+    context = ContextPackage((), 1)
 
     answer = assistant.respond(context, "request-1")
 

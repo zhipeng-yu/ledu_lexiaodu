@@ -11,14 +11,12 @@ from typing import Any
 
 import pytest
 from PySide6.QtCore import QObject, Signal
-from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from lexiaodu.attachments import AttachmentStore
+from lexiaodu.chat_context import ContextBuilder, ContextPackage
 from lexiaodu.chat_controller import ChatController
+from lexiaodu.chat_repository import ConversationRepository
 from lexiaodu.chat_window import ChatConversationView, ChatTurnView
-from lexiaodu.context import ContextBuilder, ContextPackage
-from lexiaodu.conversations import ConversationRepository
 from lexiaodu.local_crypto import DataCipher
 
 
@@ -37,7 +35,6 @@ class FakeWindow(QObject):
         self.conversations: tuple[ChatConversationView, ...] = ()
         self.turns: tuple[ChatTurnView, ...] = ()
         self.shown: list[tuple[str, tuple[ChatTurnView, ...]]] = []
-        self.suggestions: list[Any] = []
 
     @property
     def active_conversation_id(self) -> str | None:
@@ -67,11 +64,6 @@ class FakeWindow(QObject):
             return False
         self.select(conversation_id)
         return True
-
-    def append_suggestion(self, suggestion: Any) -> bool:
-        self.suggestions.append(suggestion)
-        return True
-
 
 class ManualExecutor:
     def __init__(self) -> None:
@@ -161,8 +153,6 @@ def repository_at(path: Path) -> ConversationRepository:
 def context_builder(repository: Any) -> ContextBuilder:
     return ContextBuilder(
         repository,
-        recent_limit=20,
-        related_limit=10,
         character_budget=10_000,
     )
 
@@ -182,7 +172,6 @@ def test_send_persists_before_assistant_and_background_result_stays_with_owner(
     ChatController(
         window,
         repository,
-        object(),
         context_builder(repository),
         assistant,
         assistant_executor,
@@ -220,7 +209,6 @@ def test_assistant_failure_marks_the_existing_request_failed(
     ChatController(
         window,
         repository,
-        object(),
         context_builder(repository),
         assistant,
         assistant_executor,
@@ -254,7 +242,6 @@ def test_retry_reuses_request_id_and_repeated_retry_cannot_add_two_answers(
     ChatController(
         window,
         repository,
-        object(),
         context_builder(repository),
         assistant,
         assistant_executor,
@@ -316,7 +303,6 @@ def test_reconstruction_shows_unfinished_request_without_auto_sending(
     ChatController(
         window,
         reopened,
-        object(),
         context_builder(reopened),
         assistant,
         assistant_executor,
@@ -334,35 +320,24 @@ def test_reconstruction_shows_unfinished_request_without_auto_sending(
 
 def _workspace_controller(
     tmp_path: Path,
-) -> tuple[
-    ChatController,
-    FakeWindow,
-    ConversationRepository,
-    AttachmentStore,
-]:
+) -> tuple[ChatController, FakeWindow, ConversationRepository]:
     repository = repository_at(tmp_path / "chat.sqlite3")
-    attachments = AttachmentStore(
-        tmp_path / "attachments",
-        repository,
-        DataCipher(b"c" * 32),
-    )
     window = FakeWindow()
     controller = ChatController(
         window,
         repository,
-        attachments,
         context_builder(repository),
         RecordingAssistant(repository, []),
         ManualExecutor(),
     )
-    return controller, window, repository, attachments
+    return controller, window, repository
 
 
 def test_create_intent_persists_and_selects_a_new_conversation(
     tmp_path: Path,
 ) -> None:
     application()
-    controller, window, repository, _attachments = _workspace_controller(tmp_path)
+    controller, window, repository = _workspace_controller(tmp_path)
 
     window.create_conversation_requested.emit()
 
@@ -380,7 +355,7 @@ def test_search_intent_filters_titles_and_clearing_restores_all(
     repository = repository_at(tmp_path / "chat.sqlite3")
     repository.create_conversation("英语开口练习")
     repository.create_conversation("数学计算练习")
-    controller, window, repository, _attachments = _workspace_controller(tmp_path)
+    controller, window, repository = _workspace_controller(tmp_path)
 
     window.search_requested.emit("英语")
     assert [item.title for item in window.conversations] == ["英语开口练习"]
@@ -400,7 +375,7 @@ def test_rename_intent_uses_entered_title_and_keeps_selection(
     application()
     repository = repository_at(tmp_path / "chat.sqlite3")
     conversation = repository.create_conversation("旧标题")
-    controller, window, repository, _attachments = _workspace_controller(tmp_path)
+    controller, window, repository = _workspace_controller(tmp_path)
     window.select(conversation.id)
     monkeypatch.setattr(
         "lexiaodu.chat_controller.QInputDialog.getText",
@@ -414,17 +389,14 @@ def test_rename_intent_uses_entered_title_and_keeps_selection(
     controller.shutdown()
 
 
-def test_delete_intent_tombstones_conversation_and_removes_attachment(
+def test_delete_intent_removes_conversation_and_refreshes_ui(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     application()
     repository = repository_at(tmp_path / "chat.sqlite3")
     conversation = repository.create_conversation("待删除")
-    controller, window, repository, attachments = _workspace_controller(tmp_path)
-    image = QImage(2, 2, QImage.Format.Format_RGB32)
-    image.fill(QColor("white"))
-    attachment = attachments.save_image(conversation.id, image)
+    controller, window, repository = _workspace_controller(tmp_path)
     window.select(conversation.id)
     monkeypatch.setattr(
         "lexiaodu.chat_controller.QMessageBox.question",
@@ -434,46 +406,6 @@ def test_delete_intent_tombstones_conversation_and_removes_attachment(
     window.delete_conversation_requested.emit(conversation.id)
 
     assert repository.list_conversations() == ()
-    assert not attachment.encrypted_path.exists()
-    assert window.active_conversation_id is None
-    controller.shutdown()
-
-
-def test_delete_intent_refreshes_ui_when_attachment_cleanup_must_retry(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    application()
-    repository = repository_at(tmp_path / "chat.sqlite3")
-    conversation = repository.create_conversation("cleanup retry")
-    controller, window, repository, attachments = _workspace_controller(tmp_path)
-    image = QImage(2, 2, QImage.Format.Format_RGB32)
-    image.fill(QColor("white"))
-    attachment = attachments.save_image(conversation.id, image)
-    window.select(conversation.id)
-    monkeypatch.setattr(
-        "lexiaodu.chat_controller.QMessageBox.question",
-        lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
-    )
-    real_unlink = Path.unlink
-
-    def fail_attachment_unlink(path: Path, *args, **kwargs) -> None:
-        if path.resolve() == attachment.encrypted_path.resolve():
-            raise PermissionError("attachment is temporarily locked")
-        real_unlink(path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "unlink", fail_attachment_unlink)
-
-    try:
-        controller.delete_conversation(conversation.id)
-    except PermissionError:
-        pass
-
-    assert repository.list_conversations() == ()
     assert window.conversations == ()
     assert window.active_conversation_id is None
-    assert attachment.encrypted_path.exists()
-    assert len(
-        repository.list_cleanup_jobs(conversation.id, "delete_attachment")
-    ) == 1
     controller.shutdown()
