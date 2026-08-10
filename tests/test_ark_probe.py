@@ -3,12 +3,17 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from lexiaodu.ark_probe import (
+    ArkFileApiProbeTransport,
+    ManifestError,
     ProbeAnswer,
     ProbeCase,
+    ProbeTransportError,
+    load_probe_manifest,
     run_probe,
 )
 
@@ -233,3 +238,215 @@ def test_probe_report_format_decisions_are_immutable(tmp_path) -> None:
 
     with pytest.raises(TypeError):
         report.formats["pdf"] = report.formats["pdf"]
+
+
+class FakeFilesApi:
+    def __init__(self) -> None:
+        self.created: list[tuple[bytes, str, str]] = []
+        self.retrieved: list[str] = []
+        self.deleted: list[str] = []
+        self.statuses = ["processing", "active"]
+
+    def create(self, *, file, purpose: str):
+        self.created.append((file.read(), file.name, purpose))
+        return SimpleNamespace(id="file-provider-secret")
+
+    def retrieve(self, file_id: str):
+        self.retrieved.append(file_id)
+        return SimpleNamespace(status=self.statuses.pop(0))
+
+    def delete(self, file_id: str):
+        self.deleted.append(file_id)
+        return SimpleNamespace(deleted=True)
+
+
+class FakeResponsesApi:
+    def __init__(self, output_text: str) -> None:
+        self.output_text = output_text
+        self.calls: list[dict[str, object]] = []
+
+    def create(self, **options):
+        self.calls.append(options)
+        return SimpleNamespace(output_text=self.output_text)
+
+
+def make_ark_client(output_text: str = '{"answer":"18","locator":"第 3 页"}'):
+    return SimpleNamespace(
+        files=FakeFilesApi(),
+        responses=FakeResponsesApi(output_text),
+    )
+
+
+def test_ark_file_transport_uploads_exact_pdf_and_waits_until_active(tmp_path) -> None:
+    path = tmp_path / "unchanged.pdf"
+    original = b"%PDF-1.7\nfictional sentinel"
+    path.write_bytes(original)
+    client = make_ark_client()
+    sleeps: list[float] = []
+    transport = ArkFileApiProbeTransport(
+        client,
+        "doubao-test",
+        sleep=sleeps.append,
+        poll_interval_seconds=0.01,
+        ready_timeout_seconds=1.0,
+    )
+
+    file_id = transport.upload(path, hashlib.sha256(original).hexdigest())
+
+    assert file_id == "file-provider-secret"
+    assert client.files.created == [(original, str(path), "user_data")]
+    assert client.files.retrieved == [file_id, file_id]
+    assert sleeps == [0.01]
+    assert path.read_bytes() == original
+
+
+def test_ark_file_transport_rejects_office_format_without_upload(tmp_path) -> None:
+    path = tmp_path / "unsupported.docx"
+    path.write_bytes(b"fictional")
+    client = make_ark_client()
+    transport = ArkFileApiProbeTransport(client, "doubao-test")
+
+    with pytest.raises(ProbeTransportError, match="PDF") as raised:
+        transport.upload(path, hashlib.sha256(path.read_bytes()).hexdigest())
+
+    assert raised.value.category == "unsupported_format"
+    assert client.files.created == []
+
+
+def test_ark_file_transport_asks_responses_api_for_json_locator() -> None:
+    client = make_ark_client()
+    transport = ArkFileApiProbeTransport(client, "doubao-test")
+
+    answer = transport.ask("file-provider-secret", "虚构项目课次数？")
+
+    assert answer == ProbeAnswer(answer="18", locator="第 3 页")
+    options = client.responses.calls[0]
+    assert options["model"] == "doubao-test"
+    assert options["input"][0]["content"][0] == {
+        "type": "input_file",
+        "file_id": "file-provider-secret",
+    }
+    prompt = options["input"][0]["content"][1]
+    assert prompt["type"] == "input_text"
+    assert "虚构项目课次数？" in prompt["text"]
+    assert "locator" in prompt["text"]
+
+
+def test_ark_file_transport_rejects_invalid_response_and_deletes_file() -> None:
+    client = make_ark_client("not-json")
+    transport = ArkFileApiProbeTransport(client, "doubao-test")
+
+    with pytest.raises(ProbeTransportError) as raised:
+        transport.ask("file-provider-secret", "question")
+    transport.delete("file-provider-secret")
+
+    assert raised.value.category == "invalid_response"
+    assert client.files.deleted == ["file-provider-secret"]
+
+
+def test_probe_preserves_transport_error_category(tmp_path) -> None:
+    case = make_case(tmp_path)
+    transport = FakeTransport(
+        {case.question: ProbeTransportError("permission", "denied")}
+    )
+
+    report = run_probe((case,), transport, SteppingClock(), timeout_seconds=30)
+
+    assert report.cases[0].error_category == "permission"
+
+
+@pytest.mark.parametrize(
+    ("category", "cleanup_succeeded"),
+    (("service", False), ("timeout", False), ("unsupported_format", True)),
+)
+def test_probe_marks_remote_cleanup_uncertain_when_upload_may_have_landed(
+    tmp_path,
+    category,
+    cleanup_succeeded,
+) -> None:
+    case = make_case(tmp_path)
+
+    class UploadFailureTransport(FakeTransport):
+        def upload(self, path: Path, sha256: str) -> str:
+            raise ProbeTransportError(category, "upload failed")
+
+    transport = UploadFailureTransport({})
+
+    report = run_probe((case,), transport, SteppingClock(), timeout_seconds=30)
+
+    assert report.cases[0].cleanup_succeeded is cleanup_succeeded
+
+
+def test_manifest_loader_resolves_only_files_inside_sample_root(tmp_path) -> None:
+    sample_root = tmp_path / "inputs"
+    sample_root.mkdir()
+    document = sample_root / "fictional.pdf"
+    document.write_bytes(b"%PDF-fictional")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "cases": [
+                    {
+                        "case_id": "pdf-text-01",
+                        "relative_path": "fictional.pdf",
+                        "format": "pdf",
+                        "question": "问题",
+                        "expected_answer": "答案",
+                        "expected_locator": "第 1 页",
+                        "content_kind": "text",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    cases = load_probe_manifest(sample_root, manifest)
+
+    assert cases == (
+        ProbeCase(
+            case_id="pdf-text-01",
+            path=document,
+            format="pdf",
+            question="问题",
+            expected_answer="答案",
+            expected_locator="第 1 页",
+            content_kind="text",
+        ),
+    )
+
+
+@pytest.mark.parametrize("relative_path", ("../outside.pdf", "missing.pdf"))
+def test_manifest_loader_rejects_escape_and_missing_file(
+    tmp_path,
+    relative_path,
+) -> None:
+    sample_root = tmp_path / "inputs"
+    sample_root.mkdir()
+    (tmp_path / "outside.pdf").write_bytes(b"outside")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "cases": [
+                    {
+                        "case_id": "pdf-text-01",
+                        "relative_path": relative_path,
+                        "format": "pdf",
+                        "question": "问题",
+                        "expected_answer": "答案",
+                        "expected_locator": "第 1 页",
+                        "content_kind": "text",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ManifestError):
+        load_probe_manifest(sample_root, manifest)
