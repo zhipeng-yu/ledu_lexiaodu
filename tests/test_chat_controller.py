@@ -36,6 +36,7 @@ class FakeWindow(QObject):
     retry_requested = Signal(str)
     capture_requested = Signal()
     paste_requested = Signal()
+    document_selected = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -77,6 +78,9 @@ class FakeWindow(QObject):
     def append_suggestion(self, suggestion: Any) -> bool:
         self.suggestions.append(suggestion)
         return True
+
+    def append_tool_activity(self, text: str) -> bool:
+        return bool(text.strip())
 
 
 class ManualExecutor:
@@ -365,6 +369,42 @@ def test_assistant_failure_marks_the_existing_request_failed(
     assert len(window.turns) == 1
     assert window.turns[0].status == "failed"
     assert window.turns[0].request_id == messages[0].request_id
+
+
+def test_selected_original_pdf_is_sent_with_the_next_question(
+    tmp_path: Path,
+) -> None:
+    application()
+    repository = repository_at(tmp_path / "chat.sqlite3")
+    conversation = repository.create_conversation("document")
+    assistant = RecordingAssistant(repository, ["DOCUMENT-ANSWER"])
+    assistant_executor = ManualExecutor()
+    capture, ocr, selector_factory, editor_factory = inert_capture_dependencies()
+    window = FakeWindow()
+    controller = ChatController(
+        window,
+        repository,
+        object(),
+        context_builder(repository),
+        assistant,
+        capture,
+        ocr,
+        selector_factory,
+        editor_factory,
+        assistant_executor,
+        ImmediateExecutor(),
+    )
+    pdf = tmp_path / "课程原文.pdf"
+    pdf.write_bytes(b"%PDF-1.4 original")
+
+    window.select(conversation.id)
+    window.document_selected.emit(str(pdf))
+    window.send_requested.emit("这个课程适合基础弱的孩子吗？")
+    assistant_executor.run_next()
+
+    assert assistant.calls[0][0].original_documents == (pdf.resolve(),)
+    assert "原文档：课程原文.pdf" in repository.list_messages(conversation.id)[0].body
+    controller.shutdown()
 
 
 def test_retry_reuses_request_id_and_repeated_retry_cannot_add_two_answers(

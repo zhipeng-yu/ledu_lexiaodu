@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 from lexiaodu.conversations import (
@@ -24,6 +25,7 @@ class ContextPackage:
     related_messages: tuple[Message, ...]
     attachment_texts: tuple[Attachment, ...]
     context_version: int
+    original_documents: tuple[Path, ...] = ()
 
     def all_items(self) -> tuple[ContextItem, ...]:
         summary = (self.summary,) if self.summary is not None else ()

@@ -25,6 +25,33 @@ class FakeCompletions:
         )
 
 
+class FakeFiles:
+    def __init__(self) -> None:
+        self.uploaded = b""
+        self.deleted: list[str] = []
+
+    def create(self, *, file, purpose: str):
+        assert purpose == "user_data"
+        self.uploaded = file.read()
+        return SimpleNamespace(id="file-1")
+
+    def retrieve(self, file_id: str):
+        assert file_id == "file-1"
+        return SimpleNamespace(status="active")
+
+    def delete(self, file_id: str) -> None:
+        self.deleted.append(file_id)
+
+
+class FakeResponses:
+    def __init__(self) -> None:
+        self.options = None
+
+    def create(self, **options):
+        self.options = options
+        return SimpleNamespace(output_text="这份原文档建议先确认孩子当前阅读水平。")
+
+
 def test_doubao_assistant_uses_conversation_context_as_primary_chat() -> None:
     completions = FakeCompletions()
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
@@ -51,3 +78,28 @@ def test_doubao_assistant_uses_conversation_context_as_primary_chat() -> None:
     assert "顾问" in system
     assert "公司事实" in system
     assert "不要编造" in system
+
+
+def test_doubao_assistant_sends_original_pdf_without_local_extraction(tmp_path) -> None:
+    pdf = tmp_path / "课程说明.pdf"
+    raw = b"%PDF-1.4 original bytes"
+    pdf.write_bytes(raw)
+    files = FakeFiles()
+    responses = FakeResponses()
+    client = SimpleNamespace(
+        files=files,
+        responses=responses,
+        chat=SimpleNamespace(completions=FakeCompletions()),
+    )
+    assistant = OpenAIConversationAssistant(client, "doubao-test")
+    context = ContextPackage(
+        (), None, (), (), (), 1, original_documents=(pdf,)
+    )
+
+    answer = assistant.respond(context, "request-1")
+
+    assert "原文档" in answer
+    assert files.uploaded == raw
+    assert files.deleted == ["file-1"]
+    content = responses.options["input"][0]["content"]
+    assert content[0] == {"type": "input_file", "file_id": "file-1"}

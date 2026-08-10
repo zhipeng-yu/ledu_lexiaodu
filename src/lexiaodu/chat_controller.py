@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from concurrent.futures import CancelledError, Executor, Future
+from dataclasses import replace
+from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
 
@@ -65,6 +67,8 @@ class ChatController(QObject):
         self._selector: SelectionOverlay | None = None
         self._editor: TranscriptEditor | None = None
         self._capture_request_id: str | None = None
+        self._pending_documents: dict[str, Path] = {}
+        self._request_documents: dict[str, tuple[Path, ...]] = {}
         self._shutting_down = False
 
         self._assistant_completed.connect(self._handle_assistant_completion)
@@ -78,6 +82,7 @@ class ChatController(QObject):
         window.retry_requested.connect(self.retry_request)
         window.capture_requested.connect(self.start_capture)
         window.paste_requested.connect(self.paste_screenshot)
+        window.document_selected.connect(self.select_original_document)
 
         self._refresh_conversations()
         self._ocr_executor.submit(self._preload_ocr)
@@ -184,11 +189,34 @@ class ChatController(QObject):
         body = text.strip()
         if conversation_id is None or not body or self._shutting_down:
             return
+        document = self._pending_documents.pop(conversation_id, None)
+        documents = (document,) if document is not None else ()
+        if document is not None:
+            body = f"{body}\n\n[原文档：{document.name}]"
         self._start_new_request(
             conversation_id,
             body,
             request_id=uuid4().hex,
             kind="text",
+            original_documents=documents,
+        )
+
+    @Slot(str)
+    def select_original_document(self, path_text: str) -> None:
+        conversation_id = self._window.active_conversation_id
+        if conversation_id is None or self._shutting_down:
+            return
+        path = Path(path_text).resolve()
+        if path.suffix.casefold() != ".pdf" or not path.is_file():
+            QMessageBox.information(
+                self._window,
+                "添加原文档",
+                "当前请选择 PDF 原文档。",
+            )
+            return
+        self._pending_documents[conversation_id] = path
+        self._window.append_tool_activity(
+            f"已选择原文档：{path.name}（随下一条问题发送）"
         )
 
     def _start_new_request(
@@ -198,6 +226,7 @@ class ChatController(QObject):
         *,
         request_id: str,
         kind: str,
+        original_documents: tuple[Path, ...] = (),
     ) -> None:
         self._repository.append_user_message(
             conversation_id,
@@ -206,7 +235,12 @@ class ChatController(QObject):
             kind=kind,
         )
         self._show_if_active(conversation_id)
-        self._dispatch_request(conversation_id, request_id, body)
+        self._dispatch_request(
+            conversation_id,
+            request_id,
+            body,
+            original_documents=original_documents,
+        )
 
     @Slot(str)
     def retry_request(self, request_id: str) -> None:
@@ -225,15 +259,24 @@ class ChatController(QObject):
         )
         if request is None:
             return
-        self._dispatch_request(conversation_id, request_id, request.body)
+        self._dispatch_request(
+            conversation_id,
+            request_id,
+            request.body,
+            original_documents=self._request_documents.get(request_id, ()),
+        )
 
     def _dispatch_request(
         self,
         conversation_id: str,
         request_id: str,
         body: str,
+        *,
+        original_documents: tuple[Path, ...] = (),
     ) -> None:
         try:
+            if original_documents:
+                self._request_documents[request_id] = original_documents
             request = self._repository.mark_request_processing(
                 conversation_id,
                 request_id,
@@ -241,6 +284,11 @@ class ChatController(QObject):
             if request.processing_status == "completed":
                 return
             context = self._context_builder.build(conversation_id, body)
+            if original_documents:
+                context = replace(
+                    context,
+                    original_documents=original_documents,
+                )
             future = self._assistant_executor.submit(
                 self._assistant.respond,
                 context,
@@ -270,6 +318,7 @@ class ChatController(QObject):
                 body,
                 in_reply_to_request_id=request_id,
             )
+            self._request_documents.pop(request_id, None)
         except Exception:
             self._fail_request(conversation_id, request_id)
             return
