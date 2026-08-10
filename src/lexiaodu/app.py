@@ -12,7 +12,6 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from PySide6.QtWidgets import QApplication
 
-from lexiaodu.advice import AdviceService
 from lexiaodu.attachments import AttachmentStore
 from lexiaodu.capture import CaptureError, CaptureResult, QtScreenCapture, screen_bounds
 from lexiaodu.chat_controller import ChatController, ConversationAssistant
@@ -22,7 +21,6 @@ from lexiaodu.context import ContextBuilder, ContextPackage
 from lexiaodu.conversations import ConversationRepository
 from lexiaodu.domain import centered_region
 from lexiaodu.editor import TranscriptEditor
-from lexiaodu.feedback import FeedbackStore
 from lexiaodu.font_scaling import ApplicationFontScaler
 from lexiaodu.generator import (
     Generator,
@@ -45,10 +43,7 @@ from lexiaodu.knowledge_import import (
 )
 from lexiaodu.local_crypto import DataCipher
 from lexiaodu.ocr import PaddleOcrEngine
-from lexiaodu.risk import DeterministicRiskRules
 from lexiaodu.selection import SelectionOverlay
-from lexiaodu.toolbar import FloatingToolbar
-from lexiaodu.workflow import CaptureController
 
 
 @dataclass(slots=True)
@@ -60,12 +55,6 @@ class ChatRuntime:
     context_builder: ContextBuilder
     assistant_executor: ThreadPoolExecutor
     ocr_executor: ThreadPoolExecutor
-
-
-@dataclass(slots=True)
-class LegacyRuntime:
-    toolbar: FloatingToolbar
-    controller: CaptureController
 
 
 class OfflineDemoAssistant:
@@ -171,15 +160,6 @@ def capture_primary_region(settings: AppSettings) -> CaptureResult:
     return QtScreenCapture().capture(region)
 
 
-def _position_toolbar(toolbar: FloatingToolbar, settings: AppSettings) -> None:
-    screen = QApplication.primaryScreen()
-    if screen is None:
-        return
-    available = screen.availableGeometry()
-    x = available.x() + (available.width() - toolbar.width()) // 2
-    toolbar.move(x, available.y() + settings.toolbar.top_margin)
-
-
 def _configure_application(
     application: QApplication,
     app_name: str,
@@ -234,10 +214,6 @@ def _build_generator_from_environment() -> Generator:
         max_tokens=512,
         extra_body={"thinking": {"type": "disabled"}},
     )
-
-
-def _ui_mode_from_environment() -> str:
-    return os.environ.get("LEXIAODU_UI_MODE", "chat").strip().casefold()
 
 
 def build_chat_runtime(
@@ -301,40 +277,6 @@ def build_chat_runtime(
         assistant_executor,
         ocr_executor,
     )
-
-
-def build_legacy_runtime(
-    settings: AppSettings,
-    generator: Generator,
-) -> LegacyRuntime:
-    toolbar = FloatingToolbar(
-        settings.app_name,
-        settings.toolbar.width,
-        settings.toolbar.height,
-    )
-    controller = CaptureController(
-        toolbar,
-        QtScreenCapture(),
-        PaddleOcrEngine(settings.ocr.model_cache_dir),
-        advice_service=AdviceService(
-            KnowledgeBase(
-                settings.knowledge.root_dir,
-                settings.knowledge.database_path,
-            ),
-            generator,
-            DeterministicRiskRules(),
-        ),
-        feedback_store=FeedbackStore(
-            settings.feedback.database_path,
-        ),
-    )
-    application = QApplication.instance()
-    if application is not None:
-        application.setQuitOnLastWindowClosed(False)
-        application.aboutToQuit.connect(controller.shutdown)
-    _position_toolbar(toolbar, settings)
-    toolbar.show()
-    return LegacyRuntime(toolbar, controller)
 
 
 def run(argv: Sequence[str] | None = None) -> int:
@@ -508,14 +450,6 @@ def run(argv: Sequence[str] | None = None) -> int:
         return 0
 
     load_dotenv()
-    ui_mode = _ui_mode_from_environment()
-    if ui_mode not in {"chat", "legacy"}:
-        print(
-            "LEXIAODU_UI_MODE 必须是 chat 或 legacy",
-            file=sys.stderr,
-        )
-        return 2
-
     application = QApplication([sys.argv[0]])
     font_scaler = _configure_application(application, settings.app_name)
 
@@ -531,18 +465,10 @@ def run(argv: Sequence[str] | None = None) -> int:
         )
         return 0
 
-    if ui_mode == "chat":
-        runtime: ChatRuntime | LegacyRuntime = build_chat_runtime(
-            settings,
-            OfflineDemoAssistant(),
-        )
-    else:
-        try:
-            generator = _build_generator_from_environment()
-        except ValueError as exc:
-            print(f"生成器配置错误: {exc}", file=sys.stderr)
-            return 2
-        runtime = build_legacy_runtime(settings, generator)
+    runtime = build_chat_runtime(
+        settings,
+        OfflineDemoAssistant(),
+    )
 
     try:
         exit_code = application.exec()

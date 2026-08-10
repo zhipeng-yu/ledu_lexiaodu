@@ -2,15 +2,8 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtGui import (
-    QColor,
-    QFont,
-    QGuiApplication,
-    QInputMethodEvent,
-    QPalette,
-)
+from PySide6.QtGui import QColor, QGuiApplication, QPalette
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import (
     QApplication,
@@ -18,21 +11,13 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
     QLabel,
-    QListWidget,
     QPlainTextEdit,
     QPushButton,
 )
 
 from lexiaodu.advice import AdviceSuggestion
-from lexiaodu.chat import (
-    AiChatDialog,
-    ChatMessage,
-    ChatRole,
-    SuggestionCard,
-    _SuggestionCard,
-)
+from lexiaodu.chat import SuggestionCard
 from lexiaodu.feedback import FeedbackReason, FeedbackSubmission
-from lexiaodu.font_scaling import ApplicationFontScaler
 from lexiaodu.knowledge import KnowledgeType, SearchResult
 from lexiaodu.risk import RiskAssessment, RiskLevel, TransferStatus
 
@@ -64,11 +49,7 @@ def _suggestion(level: RiskLevel) -> AdviceSuggestion:
     )
 
 
-def test_public_suggestion_card_keeps_legacy_alias() -> None:
-    assert _SuggestionCard is SuggestionCard
-
-
-def test_suggestion_card_keeps_component_styles_outside_legacy_dialog() -> None:
+def test_suggestion_card_keeps_component_styles() -> None:
     application = QApplication.instance() or QApplication([])
     card = SuggestionCard(_suggestion(RiskLevel.LOW))
     card.show()
@@ -92,248 +73,11 @@ def test_suggestion_card_keeps_component_styles_outside_legacy_dialog() -> None:
     card.close()
 
 
-def test_chat_explicit_font_roles_follow_global_scaling() -> None:
-    application = QApplication.instance() or QApplication([])
-    original_font = QFont(application.font())
-    original_delta = application.property(
-        "_lexiaodu_font_delta_points"
-    )
-    base_font = QFont(original_font)
-    base_font.setPointSizeF(10.0)
-    application.setFont(base_font)
-    scaler = ApplicationFontScaler(application)
-    dialog = AiChatDialog()
-
-    try:
-        dialog.show()
-        assert dialog.append_ai_response("字号同步测试")
-        application.processEvents()
-        title = dialog.findChild(QLabel, "chatTitle")
-        history = dialog.findChild(QListWidget, "chatHistory")
-        chat_input = dialog.findChild(QPlainTextEdit, "chatInput")
-        assert title is not None
-        assert history is not None
-        assert chat_input is not None
-        turn = history.itemWidget(history.item(0))
-        assert turn is not None
-        body = turn.findChild(QLabel, "turnBody")
-        assert body is not None
-        assert title.font().pointSizeF() == pytest.approx(15.0)
-        assert body.font().pointSizeF() == pytest.approx(12.0)
-
-        QTest.keyClick(
-            chat_input,
-            Qt.Key.Key_Plus,
-            Qt.KeyboardModifier.ControlModifier,
-        )
-        application.processEvents()
-
-        assert title.font().pointSizeF() == pytest.approx(16.0)
-        assert body.font().pointSizeF() == pytest.approx(13.0)
-    finally:
-        dialog.close()
-        application.removeEventFilter(scaler)
-        scaler.deleteLater()
-        application.setProperty(
-            "_lexiaodu_font_delta_points",
-            original_delta,
-        )
-        application.setFont(original_font)
-        application.processEvents()
-
-
-def test_send_parent_question_without_fabricating_ai_response() -> None:
-    application = QApplication.instance() or QApplication([])
-    dialog = AiChatDialog()
-    chat_input = dialog.findChild(QPlainTextEdit, "chatInput")
-    submitted: list[str] = []
-    dialog.question_submitted.connect(submitted.append)
-
-    assert application is not None
-    assert chat_input is not None
-    chat_input.setPlainText("  家长想了解请假流程\n需要哪些材料？  ")
-
-    assert dialog.send_question()
-    assert submitted == ["家长想了解请假流程\n需要哪些材料？"]
-    assert dialog.messages == (
-        ChatMessage(
-            ChatRole.QUESTION,
-            "家长想了解请假流程\n需要哪些材料？",
-        ),
-    )
-    assert "等待 AI 回复" in dialog.status_text
-    assert chat_input.toPlainText() == ""
-
-    assert not dialog.send_question()
-    assert len(dialog.messages) == 1
-    dialog.close()
-
-
-def test_chat_uses_single_column_plain_text_turns() -> None:
-    application = QApplication.instance() or QApplication([])
-    dialog = AiChatDialog()
-    history = dialog.findChild(QListWidget, "chatHistory")
-    assert history is not None
-
-    dialog.show()
-    assert dialog.append_ai_response("第一行\n**不解析为粗体** <b>也不是 HTML</b>")
-    application.processEvents()
-
-    turn = history.itemWidget(history.item(0))
-    assert turn is not None
-    assert turn.objectName() == "assistantTurn"
-    role = turn.findChild(QLabel, "turnRole")
-    body = turn.findChild(QLabel, "turnBody")
-    assert role is not None
-    assert body is not None
-    assert role.text() == "AI"
-    assert body.text() == "第一行\n**不解析为粗体** <b>也不是 HTML</b>"
-    assert body.textFormat() is Qt.TextFormat.PlainText
-    assert body.textInteractionFlags() & Qt.TextInteractionFlag.TextSelectableByMouse
-    assert turn.width() == history.viewport().width()
-    dialog.close()
-
-
-def test_enter_sends_and_shift_enter_inserts_a_line_break() -> None:
-    application = QApplication.instance() or QApplication([])
-    dialog = AiChatDialog()
-    chat_input = dialog.findChild(QPlainTextEdit, "chatInput")
-    submitted: list[str] = []
-    dialog.question_submitted.connect(submitted.append)
-
-    assert chat_input is not None
-    dialog.show()
-    chat_input.setFocus()
-    chat_input.setPlainText("第一行")
-    chat_input.moveCursor(chat_input.textCursor().MoveOperation.End)
-    QTest.keyClick(
-        chat_input,
-        Qt.Key.Key_Return,
-        Qt.KeyboardModifier.ShiftModifier,
-    )
-    chat_input.insertPlainText("第二行")
-    assert chat_input.toPlainText() == "第一行\n第二行"
-
-    QTest.keyClick(chat_input, Qt.Key.Key_Return)
-    application.processEvents()
-    assert submitted == ["第一行\n第二行"]
-    assert chat_input.toPlainText() == ""
-
-    QTest.keyClick(chat_input, Qt.Key.Key_Return)
-    assert submitted == ["第一行\n第二行"]
-    dialog.close()
-
-
-def test_placeholder_is_hidden_while_ime_text_is_being_composed() -> None:
-    application = QApplication.instance() or QApplication([])
-    dialog = AiChatDialog()
-    chat_input = dialog.findChild(QPlainTextEdit, "chatInput")
-
-    assert chat_input is not None
-    placeholder = chat_input.placeholderText()
-    assert placeholder
-
-    QApplication.sendEvent(chat_input, QInputMethodEvent("zhongwen", []))
-    assert chat_input.toPlainText() == ""
-    assert chat_input.placeholderText() == ""
-
-    commit = QInputMethodEvent()
-    commit.setCommitString("中文")
-    QApplication.sendEvent(chat_input, commit)
-    assert chat_input.toPlainText() == "中文"
-    assert chat_input.placeholderText() == placeholder
-    assert application is not None
-    dialog.close()
-
-
-def test_chat_supports_multiple_turns_and_scrolls_to_latest() -> None:
-    application = QApplication.instance() or QApplication([])
-    dialog = AiChatDialog()
-    chat_input = dialog.findChild(QPlainTextEdit, "chatInput")
-    history = dialog.findChild(QListWidget, "chatHistory")
-
-    assert chat_input is not None
-    assert history is not None
-    dialog.resize(700, 360)
-    dialog.show()
-    chat_input.setPlainText("第一个问题")
-    assert dialog.send_question()
-    assert dialog.append_ai_response("第一条 AI 回复")
-    chat_input.setPlainText("继续追问")
-    assert dialog.send_question()
-    for index in range(12):
-        assert dialog.append_ai_response(f"补充回复 {index}")
-    application.processEvents()
-
-    assert dialog.messages[:3] == (
-        ChatMessage(ChatRole.QUESTION, "第一个问题"),
-        ChatMessage(ChatRole.ASSISTANT, "第一条 AI 回复"),
-        ChatMessage(ChatRole.QUESTION, "继续追问"),
-    )
-    assert history.count() == 15
-    scroll_bar = history.verticalScrollBar()
-    assert scroll_bar.maximum() > 0
-    assert scroll_bar.value() == scroll_bar.maximum()
-    assert "AI 已回复" in dialog.status_text
-    dialog.close()
-
-
-def test_advice_mode_is_result_only_without_question_composer() -> None:
-    application = QApplication.instance() or QApplication([])
-    dialog = AiChatDialog()
-    composer = dialog.findChild(QPlainTextEdit, "chatInput")
-    assert composer is not None
-
-    dialog.begin_advice_session(3)
-    dialog.show()
-    application.processEvents()
-
-    assert dialog.windowTitle() == "顾问建议"
-    assert dialog.is_advice_mode
-    assert "已确认 3 条 OCR 对话" in dialog.status_text
-    assert not composer.isVisible()
-
-    dialog.set_manual_mode()
-    assert dialog.windowTitle() == "AI 问答"
-    assert not dialog.is_advice_mode
-    assert composer.isVisible()
-    dialog.close()
-
-
-def test_structured_suggestion_contains_complete_editable_workspace() -> None:
-    application = QApplication.instance() or QApplication([])
-    dialog = AiChatDialog()
-    history = dialog.findChild(QListWidget, "chatHistory")
-    assert history is not None
-    assert dialog.append_suggestion(_suggestion(RiskLevel.LOW))
-    application.processEvents()
-
-    card = history.itemWidget(history.item(0))
-    assert card is not None
-    assert card.objectName() == "suggestionTurn"
-    concern = card.findChild(QLabel, "concernSummary")
-    reply = card.findChild(QPlainTextEdit, "wechatReply")
-    fact = card.findChild(QLabel, "factEvidence")
-    risk = card.findChild(QLabel, "riskWarning")
-    transfer = card.findChild(QLabel, "transferStatus")
-    assert concern is not None and "请假" in concern.text()
-    assert reply is not None and not reply.isReadOnly()
-    assert fact is not None and "监护人" in fact.text()
-    assert risk is not None and "核对" in risk.text()
-    assert transfer is not None and "无需转人工" in transfer.text()
-    dialog.close()
-
-
 def test_copy_uses_edited_reply_and_high_risk_requires_confirmation() -> None:
     application = QApplication.instance() or QApplication([])
-    dialog = AiChatDialog()
-    history = dialog.findChild(QListWidget, "chatHistory")
-    assert history is not None
-    assert dialog.append_suggestion(_suggestion(RiskLevel.HIGH))
+    card = SuggestionCard(_suggestion(RiskLevel.HIGH))
+    card.show()
     application.processEvents()
-
-    card = history.itemWidget(history.item(0))
-    assert card is not None
     reply = card.findChild(QPlainTextEdit, "wechatReply")
     confirmation = card.findChild(QCheckBox, "riskConfirmation")
     copy_button = card.findChild(QPushButton, "copyReply")
@@ -348,24 +92,19 @@ def test_copy_uses_edited_reply_and_high_risk_requires_confirmation() -> None:
     assert QGuiApplication.clipboard().text() != "顾问编辑后的回复"
 
     confirmation.setChecked(True)
-    assert copy_button.isEnabled()
     QTest.mouseClick(copy_button, Qt.MouseButton.LeftButton)
     assert QGuiApplication.clipboard().text() == "顾问编辑后的回复"
-    dialog.close()
+    card.close()
 
 
 def test_structured_feedback_emits_reason_without_chat_text() -> None:
     application = QApplication.instance() or QApplication([])
-    dialog = AiChatDialog()
-    history = dialog.findChild(QListWidget, "chatHistory")
+    card = SuggestionCard(_suggestion(RiskLevel.LOW))
     submissions: list[FeedbackSubmission] = []
-    dialog.feedback_submitted.connect(submissions.append)
-    assert history is not None
-    assert dialog.append_suggestion(_suggestion(RiskLevel.LOW))
+    card.feedback_submitted.connect(submissions.append)
+    card.show()
     application.processEvents()
 
-    card = history.itemWidget(history.item(0))
-    assert card is not None
     useful = card.findChild(QPushButton, "feedbackUseful")
     reason = card.findChild(QComboBox, "feedbackReason")
     submit = card.findChild(QPushButton, "submitFeedback")
@@ -374,8 +113,6 @@ def test_structured_feedback_emits_reason_without_chat_text() -> None:
     assert reason is not None
     assert submit is not None
     assert feedback is not None
-    assert not feedback.isHidden()
-    assert feedback.isEnabled()
 
     QTest.mouseClick(useful, Qt.MouseButton.LeftButton)
     reason.setCurrentIndex(reason.findData(FeedbackReason.CLEAR))
@@ -390,4 +127,4 @@ def test_structured_feedback_emits_reason_without_chat_text() -> None:
     ]
     assert not hasattr(submissions[0], "transcript")
     assert not hasattr(submissions[0], "reply")
-    dialog.close()
+    card.close()

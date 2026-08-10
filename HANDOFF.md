@@ -331,7 +331,7 @@
 - AI 问答输入框兼容中文输入法组合态：拼音组词期间隐藏占位文字，提交或取消组合后恢复，避免占位提示与候选文字重叠。
 - README、安装运行说明、五分钟演示脚本、指定电脑手动清单、顾问试用表和验收结果已经补齐。
 - 最终代码验证为 87 tests passed，Python 编译和依赖检查通过，Qt 当前会话内存截图烟测通过。
-- 启用豆包时，OCR 校正对话和本次知识检索片段会发送给火山方舟；Key 只存在被 Git 忽略的本机 `.env`，但正式使用前仍需确认外部数据处理要求。
+- 当前独立聊天使用离线助手，不会把 OCR 校正文案或会话上下文发送给方舟；后续接入原文档顾问时仍须确认外部数据处理要求。
 - 最终指定演示电脑的真实聊天 OCR、DPI 缩放和剪贴板肉眼验证，以及真实顾问试用，仍须按 `docs/MANUAL_TEST_CHECKLIST.md` 和 `docs/ADVISOR_TRIAL_FORM.md` 执行。
 
 ## Day 4 基线
@@ -376,19 +376,18 @@
 - `AdviceService` 对每次对话执行整理 `policy`、审核原文兜底和 `style_case` 真实检索，再调用 Generator；生成器不能绕过检索流程。
 - 默认 `SimulatedGenerator` 不需要 API。检索到事实依据时，顾虑摘要保留排名第一的真实文档与定位，微信短回复只使用证据正文、不对家长展示资料名；没有事实依据时自然说明会继续确认，不编造事实，风险卡仍要求人工处理。
 - 建议卡的事实依据直接绑定 `SearchResult`，不接受生成器或未来模型自行返回引用。
-- 手动问题和 OCR 校正对话使用同一条后台生成链路，生成期间不阻塞 Qt 主线程。
-- OCR 完成后必须由顾问点击“确认无误并生成建议”才会启动建议服务；展示校正结果本身不会触发生成。
+- 独立聊天中的消息和 OCR 校正使用各自的单线程执行器，运行期间不阻塞 Qt 主线程。
+- OCR 完成后必须由顾问确认；校正文字只进入截图启动时所属会话，原图不进入助手上下文。
 - Qt 编辑器可能将发言人枚举作为 `"家长"`/`"顾问"` 字符串返回；`TranscriptLine` 会在数据边界统一转换为 `Speaker`，避免确认后组装检索文本时异常并永久停在生成状态。
-- 建议任务的同步提交错误会直接显示在结果窗口和悬浮工具条，不再静默等待。
-- 知识索引缺失或检索失败时，工作台和悬浮工具条都会显示明确错误状态。
+- 助手或 OCR 任务失败时，独立聊天窗口会显示可操作状态，不会静默等待或自动重发。
 
 ### 可替换 Generator 与真实豆包接入
 
 - `Generator` 是厂商无关的 Protocol，统一输入 `GenerationRequest`，输出 `SuggestionDraft`。
 - `OpenAICompatibleGenerator` 接受注入的 client、model、token 上限和额外请求参数，调用 `client.chat.completions.create(...)` 并要求 JSON 对象响应。
-- 应用从本机 `.env` 读取 `LEXIAODU_GENERATOR`、`ARK_BASE_URL`、`ARK_MODEL` 和 `ARK_API_KEY`；选择 `doubao` 时装配火山方舟 OpenAI 兼容 client，选择 `simulated` 或未配置时使用本地生成器。
+- `scripts/verify_doubao.py` 从本机 `.env` 读取 `LEXIAODU_GENERATOR`、`ARK_BASE_URL`、`ARK_MODEL` 和 `ARK_API_KEY`，选择 `doubao` 时装配火山方舟 OpenAI 兼容 client；独立聊天启动路径不读取该选择，当前固定使用 `OfflineDemoAssistant`。
 - 豆包装配会校验 Key 非空且仅含 ASCII、模型非空和 HTTPS base URL；远端调用失败时明确报错，不静默回退到模拟建议。
-- `scripts/verify_doubao.py` 复用正式应用装配链路，以虚构内容完成真实鉴权、模型调用和 JSON 结构验证，不输出 Key 或生成正文。
+- `scripts/verify_doubao.py` 复用 Generator 装配函数，以虚构内容完成真实鉴权、模型调用和 JSON 结构验证，不输出 Key 或生成正文；它不代表豆包已接入独立聊天。
 - 更换其他 OpenAI 兼容服务不影响检索、风险、反馈和 UI；非兼容协议可新增 Generator 适配器。
 - `openai` 和 `python-dotenv` 已作为项目依赖；真实 Key 只保存在被 Git 忽略的 `.env`，仓库仅提交 `.env.example`。
 
@@ -400,11 +399,9 @@
   - 带文档名和章节/页码的事实依据；
   - 风险等级及逐条风险提示；
   - 明确的转人工状态。
-- 工作台保留底部输入区、Enter 发送、Shift+Enter 换行、多轮记录和关闭后重新打开的进程内历史。
-- 中文输入法处于拼音组合态时，输入框暂时隐藏占位提示，组合完成或取消后恢复，不影响 Enter 和 Shift+Enter 行为。
-- 悬浮工具条“AI 问答”继续打开带输入框的手动提问窗口。
-- 截图 OCR 校正确认后打开独立的“顾问建议”结果窗口，隐藏提问框并直接展示生成状态和后续建议，不会跳入手动 AI 问答流程。
-- 保留 `append_ai_response(text)` 作为旧纯文本调用的兼容入口。
+- 独立聊天主窗口保留底部输入区、Enter 发送、Shift+Enter 换行、多轮记录和跨进程加密历史。
+- 截图 OCR 校正确认后回到所属会话，校正文案可参与该会话后续上下文。
+- 旧悬浮工具条、一次性问答窗口、界面模式开关和专属编排链路已经删除。
 
 ### 确定性风险与复制门控
 
@@ -429,9 +426,9 @@
 - `SimulatedGenerator`：默认的本地确定性实现。
 - `OpenAICompatibleGenerator(client, model)`：豆包等 OpenAI 兼容服务适配器。
 - `DeterministicRiskRules.assess(...)`：确定性风险和转人工判断。
-- `AiChatDialog.append_suggestion(suggestion)`：追加完整结构化建议卡。
+- `SuggestionCard`：呈现可编辑回复、事实依据、风险门控和可选反馈控件。
+- `ChatController`：管理独立会话、助手请求、截图/OCR 所有权和恢复流程。
 - `FeedbackStore.save(submission)`：只持久化结构化反馈元数据。
-- `CaptureController.transcript_ready`、`ai_question_submitted` 和 `append_ai_response`：继续兼容 Day 3 接口。
 - `KnowledgeImportService.prepare(source_dir)`：扫描来源增量、提取文档、更新链接图并生成审核批次。
 - `KnowledgeImportService.resume(batch_id, source_dir)`：从文件级检查点继续暂停批次。
 - `KnowledgeImportService.apply(batch_id)`：应用审核草稿、来源映射和稳定链接别名，并重建正式索引。
@@ -447,14 +444,14 @@
 - `src/lexiaodu/risk.py`：确定性风险规则与转人工状态。
 - `src/lexiaodu/feedback.py`：隐私安全的反馈数据模型和 SQLite 存储。
 - `src/lexiaodu/chat.py`：完整建议卡、编辑、复制门控和反馈交互。
-- `src/lexiaodu/workflow.py`：手动问题/OCR 到建议工作台的后台链路。
-- `src/lexiaodu/app.py`：本地模拟或真实豆包生成器的环境配置、校验和服务装配。
+- `src/lexiaodu/chat_window.py`、`src/lexiaodu/chat_controller.py`：独立聊天界面和会话/OCR 编排。
+- `src/lexiaodu/app.py`：独立聊天运行时、本地演示助手及豆包验证配置。
 - `src/lexiaodu/knowledge_import.py`：DOCX/XLSX/PPTX/PDF/图片增量提取、OCR协调、来源修订、逐块审核、FTS5 原文索引、链接图和应用事务。
 - `src/lexiaodu/ocr.py`：聊天OCR与不使用聊天布局过滤的文档OCR模式。
 - `src/lexiaodu/knowledge.py`：整理层 BM25、审核原文 FTS5、受众隔离和两层统一排序；文档名、章节、精确短语和正文共同参与排序。
 - `config/app.toml`：默认来源目录、审核暂存目录和本地知识路径。
 - `tests/test_generator.py`、`tests/test_risk.py`、`tests/test_feedback.py`：Day 4 核心逻辑测试。
-- `tests/test_chat.py`、`tests/test_workflow.py`：工作台和悬浮工具端到端交互回归。
+- `tests/test_chat.py`、`tests/test_chat_window.py`、`tests/test_chat_controller.py`：建议卡、独立聊天与会话编排回归。
 - `tests/test_knowledge_import.py`：格式提取、链接规范化、逐块审核、冲突/低可信阻断、版本切换、来源缺失、增量草稿、暂停恢复和链接入库测试。
 
 ## 验证命令
@@ -495,7 +492,7 @@ git diff --check
 ## 已知边界与后续工作
 
 - 豆包生成依赖网络、方舟服务可用性、账户额度和模型权限；失败时显示生成错误，不会自动绕过本地风险规则。
-- 启用豆包会把本次 OCR 校正对话和本次两层知识检索片段发送给火山方舟；正式使用前仍需确认供应商数据处理要求。
+- 当前独立聊天不会发送 OCR 校正文案或会话上下文；后续原文档顾问接入方舟后，正式使用前仍需确认供应商数据处理要求。
 - 风险规则是保守的确定性关键词规则；新业务风险类型需要显式补规则和测试。
 - 通过审核导入命令应用知识时会自动重建索引；直接手工编辑 `knowledge/` 后仍需执行 `--rebuild-knowledge`。
 - 增量来源导入支持扫描PDF OCR；直接把扫描PDF放入正式 `knowledge/` 仍不能由基础索引器OCR。

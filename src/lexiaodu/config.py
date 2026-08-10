@@ -11,13 +11,6 @@ class SettingsError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
-class ToolbarSettings:
-    width: int = 460
-    height: int = 52
-    top_margin: int = 24
-
-
-@dataclass(frozen=True, slots=True)
 class CaptureSettings:
     width: int = 480
     height: int = 270
@@ -58,7 +51,6 @@ class ChatSettings:
 @dataclass(frozen=True, slots=True)
 class AppSettings:
     app_name: str = "乐小读"
-    toolbar: ToolbarSettings = ToolbarSettings()
     capture: CaptureSettings = CaptureSettings()
     ocr: OcrSettings = OcrSettings()
     knowledge: KnowledgeSettings = KnowledgeSettings()
@@ -94,7 +86,6 @@ def load_settings(path: Path) -> AppSettings:
         raise SettingsError(f"配置文件格式错误: {exc}") from exc
 
     app = _table(raw, "app")
-    toolbar = _table(raw, "toolbar")
     capture = _table(raw, "capture")
     ocr = _table(raw, "ocr")
     knowledge = _table(raw, "knowledge")
@@ -155,11 +146,6 @@ def load_settings(path: Path) -> AppSettings:
 
     return AppSettings(
         app_name=app_name,
-        toolbar=ToolbarSettings(
-            width=_integer(toolbar, "width", 460),
-            height=_integer(toolbar, "height", 52),
-            top_margin=_integer(toolbar, "top_margin", 24, allow_zero=True),
-        ),
         capture=CaptureSettings(
             width=_integer(capture, "width", 480),
             height=_integer(capture, "height", 270),

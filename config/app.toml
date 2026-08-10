@@ -1,11 +1,6 @@
 [app]
 name = "乐小读"
 
-[toolbar]
-width = 460
-height = 52
-top_margin = 24
-
 [capture]
 width = 480
 height = 270
