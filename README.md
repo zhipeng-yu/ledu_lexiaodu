@@ -259,20 +259,6 @@ $env:PYTHONIOENCODING = 'utf-8'
 .\.venv\python.exe -B scripts\evaluate_advisor_knowledge.py
 ```
 
-验证方舟原 PDF 文件输入能力时，只能使用完全虚构或明确获批的非生产样本：
-
-```powershell
-.\.venv\python.exe -B scripts\verify_ark_original_files.py `
-  --sample-root artifacts\ark-original-file-probe\inputs `
-  --manifest artifacts\ark-original-file-probe\manifest.json `
-  --report-json artifacts\ark-original-file-probe\result.json
-```
-
-探针按原始二进制上传 PDF，不在本地提取、OCR、转换或切块，并在每个用例结束时
-主动删除方舟文件。DOCX、PPTX、XLSX 不属于当前 Files API 的直接文档输入格式，
-不会被静默转换。输出只包含用例 ID、格式、内容类型、布尔结果、时延、错误分类和
-File ID 的单向哈希，不包含原文件路径、问题、答案、定位文本或远端 File ID。
-
 第二条命令使用当前 22 份 policy 结构验证四个固定查询；第三条命令运行 23 类匿名化顾问知识评测，检查实时系统、内部信息、隐私、活动和地区边界，并列出每题正式知识命中。完整演示步骤见 [演示脚本](docs/DEMO_SCRIPT.md)。
 
 截图坐标使用 Qt 的逻辑像素，并且必须完整落在同一个屏幕内。跨屏区域会被明确拒绝，不会被静默裁剪或拼接。

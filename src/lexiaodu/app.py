@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from PySide6.QtWidgets import QApplication
 
+from lexiaodu.advisor_assistant import OpenAIConversationAssistant
 from lexiaodu.attachments import AttachmentStore
 from lexiaodu.capture import CaptureError, CaptureResult, QtScreenCapture, screen_bounds
 from lexiaodu.chat_controller import ChatController, ConversationAssistant
@@ -176,17 +177,26 @@ def _console_safe_text(value: str, stream: object | None = None) -> str:
 
 
 def _build_generator_from_environment() -> Generator:
-    provider = os.environ.get(
-        "LEXIAODU_GENERATOR",
-        "simulated",
-    ).strip().casefold()
+    provider = _generator_provider()
     if provider == "simulated":
         return SimulatedGenerator()
-    if provider != "doubao":
-        raise ValueError(
-            "LEXIAODU_GENERATOR 必须是 simulated 或 doubao"
-        )
+    client, model = _build_doubao_client()
+    return OpenAICompatibleGenerator(
+        client,
+        model,
+        max_tokens=512,
+        extra_body={"thinking": {"type": "disabled"}},
+    )
 
+
+def _generator_provider() -> str:
+    provider = os.environ.get("LEXIAODU_GENERATOR", "simulated").strip().casefold()
+    if provider not in {"simulated", "doubao"}:
+        raise ValueError("LEXIAODU_GENERATOR 必须是 simulated 或 doubao")
+    return provider
+
+
+def _build_doubao_client() -> tuple[OpenAI, str]:
     api_key = os.environ.get("ARK_API_KEY", "").strip()
     if not api_key:
         raise ValueError("启用豆包时必须设置 ARK_API_KEY")
@@ -208,12 +218,14 @@ def _build_generator_from_environment() -> Generator:
         timeout=30.0,
         max_retries=2,
     )
-    return OpenAICompatibleGenerator(
-        client,
-        model,
-        max_tokens=512,
-        extra_body={"thinking": {"type": "disabled"}},
-    )
+    return client, model
+
+
+def _build_conversation_assistant_from_environment() -> ConversationAssistant:
+    if _generator_provider() == "simulated":
+        return OfflineDemoAssistant()
+    client, model = _build_doubao_client()
+    return OpenAIConversationAssistant(client, model)
 
 
 def build_chat_runtime(
@@ -467,7 +479,7 @@ def run(argv: Sequence[str] | None = None) -> int:
 
     runtime = build_chat_runtime(
         settings,
-        OfflineDemoAssistant(),
+        _build_conversation_assistant_from_environment(),
     )
 
     try:
