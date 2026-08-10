@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from lexiaodu.advisor_assistant import OpenAIConversationAssistant
 from lexiaodu.chat_context import ContextPackage
 from lexiaodu.chat_repository import Message
+from lexiaodu.office_documents import OfficeDocumentError
 
 
 class FakeCompletions:
@@ -53,8 +54,9 @@ class FakeResponses:
 
 
 class RoutingCompletions:
-    def __init__(self) -> None:
+    def __init__(self, filename: str = "课程说明.pdf") -> None:
         self.options = None
+        self.filename = filename
 
     def create(self, **options):
         self.options = options
@@ -62,17 +64,37 @@ class RoutingCompletions:
             choices=[
                 SimpleNamespace(
                     message=SimpleNamespace(
-                        content='{"files":["课程说明.pdf"]}'
+                        content=f'{{"files":["{self.filename}"]}}'
                     )
                 )
             ]
         )
 
 
-def test_doubao_assistant_uses_conversation_context_as_primary_chat() -> None:
+class FakeOfficeReader:
+    def __init__(self) -> None:
+        self.query = ""
+        self.documents = ()
+
+    def retrieve(self, query, documents):
+        self.query = query
+        self.documents = documents
+        return "《课程介绍.docx》\n适合需要巩固阅读基础的孩子。"
+
+
+class FailingOfficeReader:
+    def retrieve(self, query, documents):
+        raise OfficeDocumentError("方舟未能解析 Office 原文档《课程介绍.docx》")
+
+
+def test_doubao_assistant_uses_conversation_context_as_primary_chat(tmp_path) -> None:
     completions = FakeCompletions()
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
-    assistant = OpenAIConversationAssistant(client, "doubao-test")
+    assistant = OpenAIConversationAssistant(
+        client,
+        "doubao-test",
+        document_dir=tmp_path / "company_documents",
+    )
     message = Message(
         id="message-1",
         conversation_id="conversation-1",
@@ -129,3 +151,56 @@ def test_doubao_automatically_selects_and_sends_original_pdf(tmp_path) -> None:
     content = responses.options["input"][0]["content"]
     assert content[0] == {"type": "input_file", "file_id": "file-1"}
     assert "课程说明.pdf" in routing.options["messages"][1]["content"]
+
+
+def test_doubao_uses_selected_office_document_in_answer(tmp_path) -> None:
+    document_dir = tmp_path / "company_documents"
+    document_dir.mkdir()
+    docx = document_dir / "课程介绍.docx"
+    docx.write_bytes(b"original docx bytes")
+    office_reader = FakeOfficeReader()
+    responses = FakeResponses()
+    routing = RoutingCompletions("课程介绍.docx")
+    client = SimpleNamespace(
+        responses=responses,
+        chat=SimpleNamespace(completions=routing),
+    )
+    assistant = OpenAIConversationAssistant(
+        client,
+        "doubao-test",
+        document_dir=document_dir,
+        office_reader=office_reader,
+    )
+    context = ContextPackage((), 1)
+
+    answer = assistant.respond(context, "request-1")
+
+    assert "课程介绍.docx" in answer
+    assert office_reader.documents == (docx,)
+    content = responses.options["input"][0]["content"]
+    assert content[0]["type"] == "input_text"
+    assert "方舟知识库" in content[0]["text"]
+    assert "《课程介绍.docx》" in content[0]["text"]
+    assert "适合需要巩固阅读基础" in content[0]["text"]
+
+
+def test_doubao_reports_selected_office_read_failure(tmp_path) -> None:
+    document_dir = tmp_path / "company_documents"
+    document_dir.mkdir()
+    (document_dir / "课程介绍.docx").write_bytes(b"broken")
+    assistant = OpenAIConversationAssistant(
+        SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=RoutingCompletions("课程介绍.docx")
+            )
+        ),
+        "doubao-test",
+        document_dir=document_dir,
+        office_reader=FailingOfficeReader(),
+    )
+
+    answer = assistant.respond(ContextPackage((), 1), "request-1")
+
+    assert "课程介绍.docx" in answer
+    assert "未能解析" in answer
+    assert "不能依据" in answer

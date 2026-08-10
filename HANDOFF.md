@@ -8,21 +8,19 @@
 
 - 项目目录：`E:\Project\ledu_project\lexiaodu`
 - 当前分支：`main`
-- 精简产品基线：`94464a1 docs: update README for lean core`；交接文档提交以 `git log -1` 为准。
+- Office 接入基线：`db1ff97 docs: scope final Office integration task`；最新提交以 `git log -1` 为准。
 - GitHub：`https://github.com/zhipeng-yu/ledu_lexiaodu.git`
-- 本地 `main` 已与 `origin/main` 完全同步，工作区干净。
+- 当前在 `main` 完成 Office 接入；最终提交和同步状态以本节“已验证与剩余缺口”为准。
 - 当前桌面程序未保持后台运行；需要使用时执行 `.\.venv\python.exe -m lexiaodu`。
 
-### 新窗口应该怎样继续
+### Office 接入实现（2026-08-10）
 
-- 新窗口的唯一任务是接通 Word、PowerPoint、Excel 原文档读取，即让 `DOCX`、`PPTX`、`XLSX` 在被 AI 自动选中后能够真正参与豆包回答。
-- 优先调查并使用方舟官方支持的文档知识库或原文件读取接口；只解决这条链路，不要重新设计整个项目，不要重复已经完成的大规模审计或验证。
-- 开始前先读本节与根目录 `README.md`，再检查和问题直接相关的少量代码。
-- 保持方案简单；只有真实必要时才新增模块、依赖、数据库表或测试。
-- 用户已明确要求：公司文件由用户放入 `company_documents/`，AI 自己选择需要的原文档；不要增加“手动上传文件”流程。
-- 不得在本地把 Office 文档转换成 OCR 文本、文本段或本地知识库；不得要求用户预先处理文档。原文件应保持不变。
-- 不得恢复已经删除的悬浮窗、截图、OCR、本地知识库、文本块、附件、回复卡、反馈、本地风险模块或旧 Generator。
-- 不要处理、移动、提交或删除 `company_documents/` 中的公司原文档，也不要打印 `.env` 的真实密钥。
+- `DOCX`、`PPTX`、`XLSX` 被 AI 自动选中后，应用将原文件临时上传到华北私有 TOS 的 `lexiaodu-office/` 目录，并通过 TOS 对象元数据设置本次唯一 `doc_id`。
+- 应用调用方舟知识库正式 `add_doc(add_type="tos")`、文档状态查询和新版 `search_knowledge`，检索范围严格限定为本次所选文档的 `doc_id`；检索片段连同原文件名进入现有豆包回答。
+- 检索完成或中途失败后，应用都会尝试删除知识库临时文档和 TOS 临时对象；本地公司原文件不修改、不移动、不删除。
+- 未增加上传按钮；未在本地执行 OCR、正文提取、切段或重建知识库；未恢复旧功能。
+- PDF 的 Files API / Responses 原字节上传、等待和删除流程保持不变；混合选择时 PDF 仍作为原文件输入，Office 使用方舟知识库检索证据。
+- 直接 Files / Responses 文件输入目前不支持 Office，因此采用方舟官方支持的 TOS 导入知识库能力；URL 导入有 20 MB 上限，不适合当前目录中的大文件。
 
 ### Office 接入完成标准
 
@@ -40,13 +38,14 @@
 2. 每个会话拥有独立、加密保存的上下文。
 3. 豆包根据当前会话、文件名和相对目录，从 `company_documents/` 自动选择最多三份相关原文档。
 4. PDF 以原始字节临时上传方舟参与回答，完成后尝试删除方舟临时文件；本地不执行 OCR、正文提取或切段。
-5. DOCX、PPTX、XLSX 目前只能被发现和选择，正文读取仍缺方舟文档知识库接入。
+5. DOCX、PPTX、XLSX 临时经私有 TOS 导入方舟知识库，官方解析与检索结果参与豆包回答，随后清理临时知识库文档和 TOS 对象。
 6. 公司事实必须来自原文档；实时状态查业务系统；高风险事项提示人工核实。
 
 ### 当前精简代码入口
 
 - `src/lexiaodu/app.py`：启动、豆包配置和运行时装配。
 - `src/lexiaodu/advisor_assistant.py`：自动选文档、PDF 临时上传和豆包回答。
+- `src/lexiaodu/office_documents.py`：Office 原文件的 TOS 临时上传、方舟知识库导入/检索与双端清理。
 - `src/lexiaodu/chat_window.py`：独立聊天界面。
 - `src/lexiaodu/chat_controller.py`：会话交互与异步回答。
 - `src/lexiaodu/chat_repository.py`：加密会话和消息存储。
@@ -55,9 +54,11 @@
 
 ### 已验证与剩余缺口
 
-- 精简核心测试：45 项全部通过。
-- `pip check`、源码编译和 `git diff --check` 均通过。
-- 下一窗口唯一实施项：Office 文档知识库接入。真实 PDF 引用稳定性、优秀顾问样例学习闭环和业务系统实时查询不在该窗口范围内。
+- DOCX 与 XLSX 已使用 `company_documents/` 中的小文件完成真实链路：TOS 上传、方舟解析、新版检索、豆包回答以及知识库/TOS 双端清理均成功；XLSX 本次耗时约 31 秒。
+- PPTX 使用目录中最小的 34,112,253 字节文件实测时，在 TOS 单次上传阶段被本机网络以 Windows `10053` 中止，尚未进入方舟解析；代码与定向测试已覆盖 `.pptx`，但该大文件的真实端到端验收仍建议在关闭 VPN、网络稳定时补跑一次。
+- 异常后的 TOS 临时目录已核对，没有遗留公司文件；仅保留原有大小为 0 的 `lexiaodu-office/` 目录标记。
+- 当前全量测试 52 项通过；Office 定向测试覆盖三种格式、方舟结构化处理状态、新版 `search_knowledge`、按本次 `doc_id` 过滤、失败说明和双端清理。`pip check` 与 `git diff --check` 均通过。
+- 当前实现为每次回答临时导入并删除，首次解析速度取决于文件大小和网络；后续如需顾问实时使用，建议把原文件持久保存在私有 TOS/方舟知识库，只在文件变化时同步，聊天时直接检索。
 - `artifacts/`、外层 `.pytest-tmp/` 和 `.pytest_cache/` 是被另一 Windows SID 锁定的旧测试缓存，不参与运行；必须在管理员终端取得权限后才能彻底删除。
 
 ## 2026-08-10 精简完成记录
@@ -65,14 +66,14 @@
 - 当前唯一界面是独立聊天窗口，窗口品牌已统一为“乐小读”。旧悬浮窗、截图、OCR、附件、失效回复按钮和资料抽屉均已删除。
 - 公司原文档统一放在项目目录 `company_documents/`。顾问直接提问后，豆包先根据当前会话以及文件名/相对目录自动选择最多三份相关原文档，不需要顾问手动添加附件。
 - 选中的 PDF 以原始字节上传方舟并参与回答；乐小读本地不执行 OCR、正文提取或文本切段，回答后清理方舟临时文件。
-- DOCX、PPTX、XLSX 会参与自动选择，但当前方舟 Files API 不能直接读取。选中这些格式时会明确提示需要接通方舟文档知识库，不会静默忽略或编造公司事实。
+- DOCX、PPTX、XLSX 会参与自动选择，并通过私有 TOS 临时目录导入方舟知识库；无法上传、解析或检索时会明确说明原文件名和原因，不会静默忽略或编造公司事实。
 - 旧知识库、知识导入、OCR、附件、回复卡、反馈、本地风险、旧 Generator 和未接入文档目录路由的源码及测试已彻底删除，不再保留可启动入口。
 - 上下文按当前会话时间顺序发送，并明确标记“顾问”和“乐小读”；超出预算时从最早的完整消息开始裁剪，不跨会话读取。
 - 实际聊天库保留 2 个会话和 11 条普通消息；已删除 1 条旧截图/OCR消息、1 个旧附件及所有旧表。`data/chat.key` 与公司原文档均保留。
 - 虚拟环境已从约 1694 MiB 精简到约 850 MiB；PaddleOCR、PaddlePaddle、OpenCV、NumPy、pypdf 等旧软件已卸载，`pip check` 无损坏依赖。
-- 默认启动命令：`.\.venv\python.exe -m lexiaodu`。`.env` 需包含 `LEXIAODU_GENERATOR=doubao`、`ARK_BASE_URL`、`ARK_MODEL` 和 `ARK_API_KEY`。
-- 2026-08-10 最终验收：45 项测试全部通过，源码编译通过，`pip check` 无依赖冲突，`git diff --check` 通过；正式桌面窗口已用 `doubao` 默认配置成功启动（验收进程 PID 45420）。
-- 仍需后续完成：Office 文档知识库接入、真实引用稳定性验收、脱敏且人工审核的优秀顾问样例学习闭环。
+- 默认启动命令：`.\.venv\python.exe -m lexiaodu`。正式模式除豆包四项配置外，还需 `VOLC_ACCESSKEY`、`VOLC_SECRETKEY`、`TOS_BUCKET` 和 `ARK_KB_COLLECTION`；可选项及默认值见 `.env.example`。
+- 2026-08-10 Office 验收：DOCX、XLSX 真实方舟链路通过，PPTX 大文件上传受本机网络 `10053` 中断；全量测试 52 项通过，`pip check` 与 `git diff --check` 均通过。
+- 仍需后续完成：PDF 文件名/页码引用稳定性验收、脱敏且人工审核的优秀顾问样例学习闭环和业务系统实时查询；这些不属于本次 Office 接入。
 - 旧测试缓存 `artifacts/`、外层 `.pytest-tmp/` 和 `.pytest_cache/` 由另一沙箱 SID 持有；当前账户无法接管 ACL。这些缓存不参与运行，需要管理员终端手工删除。
 
 以下 2026-08-06 及更早内容仅为历史归档，其中关于截图/OCR、旧本地知识库、回复卡、风险模块和离线助手默认入口的描述已经失效。

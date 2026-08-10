@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QApplication
 from lexiaodu.app import (
     OfflineDemoAssistant,
     _build_conversation_assistant_from_environment,
+    _build_office_reader_from_environment,
     _configure_application,
     build_parser,
     build_chat_runtime,
@@ -41,6 +42,14 @@ def _clear_generator_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         "ARK_API_KEY",
         "ARK_BASE_URL",
         "ARK_MODEL",
+        "ARK_KB_COLLECTION",
+        "ARK_KB_HOST",
+        "ARK_KB_PROJECT",
+        "TOS_BUCKET",
+        "TOS_ENDPOINT",
+        "VOLC_ACCESSKEY",
+        "VOLC_REGION",
+        "VOLC_SECRETKEY",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -153,6 +162,7 @@ def test_build_assistant_configures_doubao_client(monkeypatch) -> None:
     monkeypatch.setenv("ARK_API_KEY", "test-key")
     monkeypatch.setenv("ARK_MODEL", "doubao-test-model")
     monkeypatch.setenv("ARK_BASE_URL", "https://ark.example/api/v3")
+    office_reader = object()
     captured = {}
 
     def fake_openai(**kwargs):
@@ -160,6 +170,10 @@ def test_build_assistant_configures_doubao_client(monkeypatch) -> None:
         return SimpleNamespace()
 
     monkeypatch.setattr("lexiaodu.app.OpenAI", fake_openai)
+    monkeypatch.setattr(
+        "lexiaodu.app._build_office_reader_from_environment",
+        lambda: office_reader,
+    )
 
     assistant = _build_conversation_assistant_from_environment()
 
@@ -169,6 +183,72 @@ def test_build_assistant_configures_doubao_client(monkeypatch) -> None:
         "base_url": "https://ark.example/api/v3",
         "timeout": 30.0,
         "max_retries": 2,
+    }
+    assert assistant._office_reader is office_reader
+
+
+def test_office_reader_is_optional_but_rejects_partial_configuration(
+    monkeypatch,
+) -> None:
+    _clear_generator_environment(monkeypatch)
+
+    assert _build_office_reader_from_environment() is None
+
+    monkeypatch.setenv("VOLC_ACCESSKEY", "access-key")
+    with pytest.raises(ValueError, match="VOLC_SECRETKEY"):
+        _build_office_reader_from_environment()
+
+
+def test_build_office_reader_configures_official_ark_services(monkeypatch) -> None:
+    _clear_generator_environment(monkeypatch)
+    monkeypatch.setenv("VOLC_ACCESSKEY", "access-key")
+    monkeypatch.setenv("VOLC_SECRETKEY", "secret-key")
+    monkeypatch.setenv("ARK_KB_COLLECTION", "office-originals")
+    monkeypatch.setenv("TOS_BUCKET", "private-bucket")
+    captured = {}
+    collection = SimpleNamespace(project="default", resource_id="resource-1")
+
+    class FakeKnowledgeService:
+        def __init__(self, **options):
+            captured["knowledge"] = options
+
+        def get_collection(self, name, *, project):
+            captured["collection"] = (name, project)
+            return collection
+
+    def fake_tos_client(*args, **kwargs):
+        captured["tos"] = (args, kwargs)
+        return SimpleNamespace()
+
+    monkeypatch.setattr(
+        "lexiaodu.app.VikingKnowledgeBaseService",
+        FakeKnowledgeService,
+    )
+    monkeypatch.setattr("lexiaodu.app.tos.TosClientV2", fake_tos_client)
+
+    reader = _build_office_reader_from_environment()
+
+    assert reader._collection is collection
+    assert captured == {
+        "knowledge": {
+            "host": "api-knowledgebase.mlp.cn-beijing.volces.com",
+            "region": "cn-beijing",
+            "ak": "access-key",
+            "sk": "secret-key",
+            "scheme": "https",
+            "connection_timeout": 30,
+            "socket_timeout": 30,
+        },
+        "collection": ("office-originals", "default"),
+        "tos": (
+            (
+                "access-key",
+                "secret-key",
+                "tos-cn-beijing.volces.com",
+                "cn-beijing",
+            ),
+            {"request_timeout": 300, "socket_timeout": 300},
+        ),
     }
 
 

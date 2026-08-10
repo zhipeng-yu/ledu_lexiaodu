@@ -3,13 +3,22 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from .chat_context import ContextPackage
+from .office_documents import OfficeDocumentError
 
 
 class AdvisorAssistantError(RuntimeError):
     pass
+
+
+class OfficeDocumentReader(Protocol):
+    def retrieve(
+        self,
+        query: str,
+        documents: tuple[Path, ...],
+    ) -> str: ...
 
 
 class OpenAIConversationAssistant:
@@ -19,12 +28,14 @@ class OpenAIConversationAssistant:
         model: str,
         *,
         document_dir: Path = Path("company_documents"),
+        office_reader: OfficeDocumentReader | None = None,
     ) -> None:
         if not model.strip():
             raise ValueError("模型名称不能为空")
         self._client = client
         self._model = model.strip()
         self._document_dir = Path(document_dir)
+        self._office_reader = office_reader
         self._document_dir.mkdir(parents=True, exist_ok=True)
 
     def respond(self, context: ContextPackage, request_id: str) -> str:
@@ -32,25 +43,49 @@ class OpenAIConversationAssistant:
         try:
             documents = self._available_documents()
             selected = self._select_documents(context, documents)
-            unsupported = tuple(
+            office_documents = tuple(
                 path for path in selected if path.suffix.casefold() != ".pdf"
             )
-            if unsupported:
-                names = "、".join(path.name for path in unsupported)
+            if office_documents and self._office_reader is None:
+                names = "、".join(path.name for path in office_documents)
                 return (
                     f"我判断本次需要参考《{names}》，但该格式必须通过方舟文档知识库读取，"
                     "当前尚未完成知识库接口配置，因此不能据此编造公司事实。"
                 )
+            office_evidence = (
+                self._office_reader.retrieve(
+                    context.render_for_model(),
+                    office_documents,
+                )
+                if office_documents and self._office_reader is not None
+                else None
+            )
+            pdf_documents = tuple(
+                path for path in selected if path.suffix.casefold() == ".pdf"
+            )
             content = (
-                self._respond_with_original_documents(context, selected)
+                self._respond_with_original_documents(
+                    context,
+                    pdf_documents,
+                    office_evidence=office_evidence,
+                )
                 if selected
                 else self._respond_with_chat(context)
             )
+        except OfficeDocumentError as exc:
+            return f"{exc}，因此本次不能依据该文档回答公司事实。"
         except Exception as exc:
             raise AdvisorAssistantError("豆包顾问对话失败") from exc
         if not isinstance(content, str) or not content.strip():
             raise AdvisorAssistantError("豆包顾问返回为空")
-        return content.strip()
+        content = content.strip()
+        missing_names = [
+            path.name for path in office_documents if path.name not in content
+        ]
+        if missing_names:
+            sources = "、".join(f"《{name}》" for name in missing_names)
+            content = f"{content}\n\n依据原文件：{sources}"
+        return content
 
     def _available_documents(self) -> tuple[Path, ...]:
         return tuple(
@@ -124,6 +159,8 @@ class OpenAIConversationAssistant:
         self,
         context: ContextPackage,
         documents: tuple[Path, ...],
+        *,
+        office_evidence: str | None = None,
     ) -> str:
         file_ids: list[str] = []
         try:
@@ -137,6 +174,14 @@ class OpenAIConversationAssistant:
                     )
                 file_ids.append(uploaded.id)
                 self._wait_until_active(uploaded.id)
+            prompt = (
+                f"{_SYSTEM_PROMPT}\n\n"
+                f"当前会话：\n{context.render_for_model()}\n\n"
+                "方舟知识库从本次所选 Office 原文档检索到：\n"
+                f"{office_evidence}"
+                if office_evidence is not None
+                else f"{_SYSTEM_PROMPT}\n\n{context.render_for_model()}"
+            )
             response = self._client.responses.create(
                 model=self._model,
                 input=[
@@ -149,7 +194,7 @@ class OpenAIConversationAssistant:
                             ),
                             {
                                 "type": "input_text",
-                                "text": f"{_SYSTEM_PROMPT}\n\n{context.render_for_model()}",
+                                "text": prompt,
                             },
                         ],
                     }

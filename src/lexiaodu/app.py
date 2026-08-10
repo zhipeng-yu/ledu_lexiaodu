@@ -11,6 +11,8 @@ from typing import Sequence
 from dotenv import load_dotenv
 from openai import OpenAI
 from PySide6.QtWidgets import QApplication
+import tos
+from volcengine.viking_knowledgebase import VikingKnowledgeBaseService
 
 from lexiaodu.advisor_assistant import OpenAIConversationAssistant
 from lexiaodu.chat_context import ContextBuilder, ContextPackage
@@ -20,6 +22,7 @@ from lexiaodu.chat_window import ChatMainWindow
 from lexiaodu.config import AppSettings, SettingsError, load_settings
 from lexiaodu.font_scaling import ApplicationFontScaler
 from lexiaodu.local_crypto import DataCipher
+from lexiaodu.office_documents import ArkOfficeDocumentReader
 
 
 @dataclass(slots=True)
@@ -92,11 +95,73 @@ def _build_doubao_client() -> tuple[OpenAI, str]:
     return client, model
 
 
+def _build_office_reader_from_environment() -> ArkOfficeDocumentReader | None:
+    required = {
+        name: os.environ.get(name, "").strip()
+        for name in (
+            "VOLC_ACCESSKEY",
+            "VOLC_SECRETKEY",
+            "ARK_KB_COLLECTION",
+            "TOS_BUCKET",
+        )
+    }
+    if not any(required.values()):
+        return None
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        raise ValueError(
+            "Office 原文档配置不完整，缺少 " + "、".join(missing)
+        )
+    access_key = required["VOLC_ACCESSKEY"]
+    secret_key = required["VOLC_SECRETKEY"]
+    collection_name = required["ARK_KB_COLLECTION"]
+    bucket = required["TOS_BUCKET"]
+    region = os.environ.get("VOLC_REGION", "cn-beijing").strip()
+    project = os.environ.get("ARK_KB_PROJECT", "default").strip()
+    knowledge_service = VikingKnowledgeBaseService(
+        host=os.environ.get(
+            "ARK_KB_HOST",
+            "api-knowledgebase.mlp.cn-beijing.volces.com",
+        ).strip(),
+        region=region,
+        ak=access_key,
+        sk=secret_key,
+        scheme="https",
+        connection_timeout=30,
+        socket_timeout=30,
+    )
+    collection = knowledge_service.get_collection(
+        collection_name,
+        project=project,
+    )
+    tos_client = tos.TosClientV2(
+        access_key,
+        secret_key,
+        os.environ.get(
+            "TOS_ENDPOINT",
+            "tos-cn-beijing.volces.com",
+        ).strip(),
+        region,
+        request_timeout=300,
+        socket_timeout=300,
+    )
+    return ArkOfficeDocumentReader(
+        tos_client,
+        knowledge_service,
+        collection,
+        bucket,
+    )
+
+
 def _build_conversation_assistant_from_environment() -> ConversationAssistant:
     if _generator_provider() == "simulated":
         return OfflineDemoAssistant()
     client, model = _build_doubao_client()
-    return OpenAIConversationAssistant(client, model)
+    return OpenAIConversationAssistant(
+        client,
+        model,
+        office_reader=_build_office_reader_from_environment(),
+    )
 
 
 def build_chat_runtime(
