@@ -147,8 +147,32 @@ def test_doubao_selects_cloud_pdf_and_office_without_local_files_api() -> None:
     assert "方舟知识库" in content[0]["text"]
     assert "《课程说明.pdf》" in content[0]["text"]
     assert "《课程介绍.docx》" in content[0]["text"]
+    assert "timeout" not in responses.options
     assert "课程说明.pdf" in answer
     assert "课程介绍.docx" in answer
+
+
+def test_doubao_allows_office_knowledge_response_to_exceed_default_timeout() -> None:
+    documents = (
+        KnowledgeDocument("doc-docx", "课程介绍.docx"),
+        KnowledgeDocument("doc-xlsx", "课程大纲.xlsx"),
+    )
+    reader = FakeKnowledgeReader(documents)
+    responses = FakeResponses()
+    assistant = OpenAIConversationAssistant(
+        SimpleNamespace(
+            responses=responses,
+            chat=SimpleNamespace(
+                completions=RoutingCompletions(("doc-docx", "doc-xlsx"))
+            ),
+        ),
+        "doubao-test",
+        knowledge_reader=reader,
+    )
+
+    assistant.respond(ContextPackage((), 1), "request-1")
+
+    assert responses.options["timeout"] == 120.0
 
 
 def test_doubao_ignores_unknown_or_duplicate_cloud_document_ids() -> None:

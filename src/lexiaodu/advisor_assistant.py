@@ -51,6 +51,7 @@ class OpenAIConversationAssistant:
             content = (
                 self._respond_with_knowledge_documents(
                     context,
+                    selected,
                     knowledge_evidence=knowledge_evidence,
                 )
                 if selected
@@ -141,6 +142,7 @@ class OpenAIConversationAssistant:
     def _respond_with_knowledge_documents(
         self,
         context: ContextPackage,
+        documents: tuple[KnowledgeDocument, ...],
         *,
         knowledge_evidence: str | None,
     ) -> str:
@@ -150,9 +152,9 @@ class OpenAIConversationAssistant:
             "方舟知识库从本次所选原文档检索到：\n"
             f"{knowledge_evidence}"
         )
-        response = self._client.responses.create(
-            model=self._model,
-            input=[
+        request = {
+            "model": self._model,
+            "input": [
                 {
                     "role": "user",
                     "content": [
@@ -163,7 +165,13 @@ class OpenAIConversationAssistant:
                     ],
                 }
             ],
-        )
+        }
+        if all(
+            document.name.casefold().endswith((".docx", ".pptx", ".xlsx"))
+            for document in documents
+        ):
+            request["timeout"] = 120.0
+        response = self._client.responses.create(**request)
         return response.output_text
 
 
