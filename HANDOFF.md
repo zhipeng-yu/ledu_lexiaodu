@@ -14,21 +14,14 @@
 
 乐小读是面向公司顾问的独立 AI 会话应用。会话及消息按会话隔离并在本地加密保存。顾问直接提问，AI 自动选择最多三份相关公司原文档；界面没有手动上传入口。
 
-### PDF
+### PDF、DOCX、PPTX、XLSX
 
-1. 从本地 `company_documents/` 发现并选择 PDF。
-2. 按原始字节临时上传方舟 Files API。
-3. 通过 Responses API 参与回答。
-4. 回答完成后尝试删除方舟临时文件。
+1. 通过方舟知识库 `list_docs` 获取已解析完成的四类云端文档，不扫描本地 `company_documents/`。
+2. 将云端 `doc_id` 和文件名交给豆包，自动选择最多三份相关文档。
+3. 使用新版 `search_knowledge`，把所有选中文档的 `doc_id` 放入同一次请求以限定检索范围，避免逐文档调用触发标准版 QPS 限制。
+4. 将方舟解析和检索的内容连同原文件名交给 Responses API 生成最终回答。
 
-### DOCX、PPTX、XLSX
-
-1. 从本地 `company_documents/` 发现候选文件并让 AI 选择。
-2. 按本地文件名在方舟知识库查找同名且解析完成的文档。
-3. 使用新版 `search_knowledge`，按 `doc_id` 限定检索范围。
-4. 检索内容连同原文件名进入豆包回答。
-
-Office 原文件及解析结果长期保存在方舟知识库。应用运行时只读知识库，不上传或删除 Office 云端文档，也不再需要 `TOS_BUCKET`、`TOS_ENDPOINT`。
+四类原文件及解析结果长期保存在方舟知识库。应用运行时只读知识库，不上传、更新或删除云端文档，不使用方舟 Files API，也不需要本地原文档副本、`TOS_BUCKET` 或 `TOS_ENDPOINT`。
 
 ### 明确不包含
 
@@ -38,8 +31,8 @@ Office 原文件及解析结果长期保存在方舟知识库。应用运行时�
 
 ## 3. 云端与本地文件现状
 
-- 当前本地 Office 文件仍有作用：文件名和相对路径用于候选发现、AI 路由及云端同名匹配。现在直接删除本地 Office 文件，会导致对应云端文档不再被选中。
-- 当前 PDF 完全依赖本地原文件，不能删除。
+- 本地 PDF、DOCX、PPTX、XLSX 已不参与候选发现、AI 路由或知识检索；现有本地文件不会被应用读取、修改或删除。
+- 云端文档必须处于解析成功状态，且文件名保留支持的扩展名，才会进入候选列表。
 - 方舟知识库控制台支持本地上传、TOS 导入和公开链接导入。本地上传不强制使用 TOS；文件很多时官方建议使用 TOS 批量导入。
 - 方舟官方依据：
   - `https://www.volcengine.com/docs/82379/1261883?lang=zh`
@@ -73,52 +66,28 @@ ARK_KB_HOST=api-knowledgebase.mlp.cn-beijing.volces.com
 ## 5. 关键代码
 
 - `src/lexiaodu/app.py`：启动、豆包与方舟知识库配置。
-- `src/lexiaodu/advisor_assistant.py`：本地文档发现、AI 文件选择、PDF 流程及最终回答。
-- `src/lexiaodu/office_documents.py`：Office 同名匹配、状态检查、限定 `doc_id` 的知识检索。
+- `src/lexiaodu/advisor_assistant.py`：云端文档选择、知识库证据与最终回答。
+- `src/lexiaodu/office_documents.py`：四类云端文档发现、状态过滤及限定 `doc_id` 的知识检索。
 - `src/lexiaodu/chat_controller.py`：会话交互与异步回答。
 - `src/lexiaodu/chat_repository.py`：加密会话和消息存储。
 - `src/lexiaodu/chat_context.py`：单会话上下文构建与裁剪。
 - `src/lexiaodu/chat_window.py`：桌面聊天界面。
-- `tests/test_office_documents.py`、`tests/test_advisor_assistant.py`、`tests/test_app.py`：Office 与运行时主要验证。
+- `tests/test_office_documents.py`、`tests/test_advisor_assistant.py`、`tests/test_app.py`：云端文档与运行时主要验证。
 
 ## 6. 已验证事实
 
 - Office 长期知识库读取实现基线：`e82f309 feat: read persistent Office documents from Ark`。
-- 基线全量测试：52 项通过。
-- 方舟 API 能列出以下两份同名文档，状态均为 `process_status=0`：
-  - `26一升二年级数学 夏秋产品说明.docx`：`office_1ae9f22bb69842308c6527c3a12e5ed5`
-  - `小学2026夏秋【美化版大纲】.xlsx`：`office_d777424fe7794a179bb6abf478b292b4`
-- 直接调用 `ArkOfficeDocumentReader.retrieve()` 检索上述两份文件曾成功返回 3995 个字符，包含 DOCX 表格内容。
+- 本次实现将 PDF 与 Office 统一为只读知识库路径；本地副本与方舟 Files API 已退出运行时文档流程。
+- 2026-08-11 通过当前应用适配器只读列出 92 份已解析候选：PDF 9、DOCX 51、PPTX 7、XLSX 25。
+- 同日使用每类一份文档执行一次多 `doc_id` 合并检索，成功返回 25190 个字符，四个来源文件名均出现在证据中。
+- 逐文档连续检索曾在第二个请求复现方舟 `1000029` QPS 限流；合并为一次检索后真实调用通过。
+- 当前全量自动化测试为 53 项通过。
 - 方舟控制台的知识问答能够依据当前知识库回答二年级数学课程问题。
 
-## 7. 已知问题
-
-### 7.1 云端缺少同名文件
-
-本地文件 `26夏秋小学数学产品说明-26.4.docx` 曾被 AI 选中，但当时云端知识库没有同名文档，因此应用明确提示“未找到同名 Office 原文档”。这与下面的异常不是同一问题。
-
-### 7.2 云端文档正常但应用仍偶发通用失败
-
-上述两份 `process_status=0` 的文档在乐小读实际会话中仍出现过：
-
-`方舟读取 Office 原文档失败：《26一升二年级数学 夏秋产品说明.docx、小学2026夏秋【美化版大纲】.xlsx》`
-
-当前代码把非 `OfficeDocumentError` 异常统一包装成通用提示，聊天记录没有保存底层异常类型、错误码或具体失败阶段，因此已有截图不能还原精确原因。
-
-## 8. 待办任务提示词
-
-### 任务一：Office 改为只依赖云端文档
-
-> 请先完整阅读项目根目录 `README.md` 和 `HANDOFF.md`。唯一任务：公司 Office 文档全部导入方舟知识库后，使乐小读在本地没有 DOCX、PPTX、XLSX 副本时，仍能从方舟知识库自动选择相关文档并参与回答。保持 PDF 流程不变；不增加上传按钮；不做本地 OCR、正文提取、切段或知识库重建；不恢复旧功能；不删除本地文件、聊天数据或云端文档。先核对当前代码和方舟正式接口，再实施、做必要验证、更新 `README.md` 与 `HANDOFF.md`，提交 `main` 并推送 GitHub。
-
-### 任务二：定位并修复云端文档读取失败
-
-> 请先完整阅读项目根目录 `README.md` 和 `HANDOFF.md`。唯一任务：查清并修复“方舟知识库中文档同名、存在且 `process_status=0`，控制台知识问答正常，但乐小读实际会话仍显示 Office 读取失败”的问题。必须基于乐小读实际调用链取得证据，区分文档缺失、解析未完成、检索无结果和方舟调用异常；不猜测原因；不改动或删除公司文件和云端文档；不改变 PDF 流程；只做必要的小范围验证。完成后使用第 6 节两份文档进行一次乐小读真实会话验证，更新 `README.md` 与 `HANDOFF.md`，提交 `main` 并推送 GitHub。
-
-## 9. 完成检查
+## 7. 完成检查
 
 - 改动严格对应当前任务，没有恢复旧功能或顺手重构无关代码。
-- PDF 流程保持不变，除非用户明确改变范围。
+- PDF、DOCX、PPTX、XLSX 保持统一的只读知识库流程，除非用户明确改变范围。
 - 未删除或改写公司文档、聊天数据、密钥及云端知识库文档。
 - 运行与风险相匹配的最小测试；完成前至少执行 `git diff --check`。
 - 更新 `README.md` 和本文件中的当前状态，删除已经失效的描述，不追加过程流水账。

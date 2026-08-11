@@ -21,7 +21,7 @@ from lexiaodu.chat_window import ChatMainWindow
 from lexiaodu.config import AppSettings, SettingsError, load_settings
 from lexiaodu.font_scaling import ApplicationFontScaler
 from lexiaodu.local_crypto import DataCipher
-from lexiaodu.office_documents import ArkOfficeDocumentReader
+from lexiaodu.office_documents import ArkKnowledgeDocumentReader
 
 
 @dataclass(slots=True)
@@ -94,7 +94,7 @@ def _build_doubao_client() -> tuple[OpenAI, str]:
     return client, model
 
 
-def _build_office_reader_from_environment() -> ArkOfficeDocumentReader | None:
+def _build_knowledge_reader_from_environment() -> ArkKnowledgeDocumentReader | None:
     required = {
         name: os.environ.get(name, "").strip()
         for name in (
@@ -108,7 +108,7 @@ def _build_office_reader_from_environment() -> ArkOfficeDocumentReader | None:
     missing = [name for name, value in required.items() if not value]
     if missing:
         raise ValueError(
-            "Office 原文档配置不完整，缺少 " + "、".join(missing)
+            "知识库原文档配置不完整，缺少 " + "、".join(missing)
         )
     access_key = required["VOLC_ACCESSKEY"]
     secret_key = required["VOLC_SECRETKEY"]
@@ -131,7 +131,7 @@ def _build_office_reader_from_environment() -> ArkOfficeDocumentReader | None:
         collection_name,
         project=project,
     )
-    return ArkOfficeDocumentReader(
+    return ArkKnowledgeDocumentReader(
         knowledge_service,
         collection,
     )
@@ -144,7 +144,7 @@ def _build_conversation_assistant_from_environment() -> ConversationAssistant:
     return OpenAIConversationAssistant(
         client,
         model,
-        office_reader=_build_office_reader_from_environment(),
+        knowledge_reader=_build_knowledge_reader_from_environment(),
     )
 
 

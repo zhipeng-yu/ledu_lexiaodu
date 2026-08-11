@@ -1,23 +1,23 @@
 from __future__ import annotations
 
 import json
-import time
-from pathlib import Path
 from typing import Any, Protocol
 
 from .chat_context import ContextPackage
-from .office_documents import OfficeDocumentError
+from .office_documents import KnowledgeDocument, KnowledgeDocumentError
 
 
 class AdvisorAssistantError(RuntimeError):
     pass
 
 
-class OfficeDocumentReader(Protocol):
+class KnowledgeDocumentReader(Protocol):
+    def list_documents(self) -> tuple[KnowledgeDocument, ...]: ...
+
     def retrieve(
         self,
         query: str,
-        documents: tuple[Path, ...],
+        documents: tuple[KnowledgeDocument, ...],
     ) -> str: ...
 
 
@@ -27,52 +27,36 @@ class OpenAIConversationAssistant:
         client: Any,
         model: str,
         *,
-        document_dir: Path = Path("company_documents"),
-        office_reader: OfficeDocumentReader | None = None,
+        knowledge_reader: KnowledgeDocumentReader | None = None,
     ) -> None:
         if not model.strip():
             raise ValueError("模型名称不能为空")
         self._client = client
         self._model = model.strip()
-        self._document_dir = Path(document_dir)
-        self._office_reader = office_reader
-        self._document_dir.mkdir(parents=True, exist_ok=True)
+        self._knowledge_reader = knowledge_reader
 
     def respond(self, context: ContextPackage, request_id: str) -> str:
         del request_id
         try:
             documents = self._available_documents()
             selected = self._select_documents(context, documents)
-            office_documents = tuple(
-                path for path in selected if path.suffix.casefold() != ".pdf"
-            )
-            if office_documents and self._office_reader is None:
-                names = "、".join(path.name for path in office_documents)
-                return (
-                    f"我判断本次需要参考《{names}》，但该格式必须通过方舟文档知识库读取，"
-                    "当前尚未完成知识库接口配置，因此不能据此编造公司事实。"
-                )
-            office_evidence = (
-                self._office_reader.retrieve(
+            knowledge_evidence = (
+                self._knowledge_reader.retrieve(
                     context.render_for_model(),
-                    office_documents,
+                    selected,
                 )
-                if office_documents and self._office_reader is not None
+                if selected and self._knowledge_reader is not None
                 else None
             )
-            pdf_documents = tuple(
-                path for path in selected if path.suffix.casefold() == ".pdf"
-            )
             content = (
-                self._respond_with_original_documents(
+                self._respond_with_knowledge_documents(
                     context,
-                    pdf_documents,
-                    office_evidence=office_evidence,
+                    knowledge_evidence=knowledge_evidence,
                 )
                 if selected
                 else self._respond_with_chat(context)
             )
-        except OfficeDocumentError as exc:
+        except KnowledgeDocumentError as exc:
             return f"{exc}，因此本次不能依据该文档回答公司事实。"
         except Exception as exc:
             raise AdvisorAssistantError("豆包顾问对话失败") from exc
@@ -80,37 +64,26 @@ class OpenAIConversationAssistant:
             raise AdvisorAssistantError("豆包顾问返回为空")
         content = content.strip()
         missing_names = [
-            path.name for path in office_documents if path.name not in content
+            document.name for document in selected if document.name not in content
         ]
         if missing_names:
             sources = "、".join(f"《{name}》" for name in missing_names)
             content = f"{content}\n\n依据原文件：{sources}"
         return content
 
-    def _available_documents(self) -> tuple[Path, ...]:
-        return tuple(
-            sorted(
-                (
-                    path
-                    for path in self._document_dir.rglob("*")
-                    if path.is_file()
-                    and path.suffix.casefold() in _SUPPORTED_FORMATS
-                ),
-                key=lambda path: path.relative_to(self._document_dir).as_posix(),
-            )
-        )
+    def _available_documents(self) -> tuple[KnowledgeDocument, ...]:
+        if self._knowledge_reader is None:
+            return ()
+        return self._knowledge_reader.list_documents()
 
     def _select_documents(
         self,
         context: ContextPackage,
-        documents: tuple[Path, ...],
-    ) -> tuple[Path, ...]:
+        documents: tuple[KnowledgeDocument, ...],
+    ) -> tuple[KnowledgeDocument, ...]:
         if not documents:
             return ()
-        by_name = {
-            path.relative_to(self._document_dir).as_posix(): path
-            for path in documents
-        }
+        by_id = {document.doc_id: document for document in documents}
         response = self._client.chat.completions.create(
             model=self._model,
             messages=[
@@ -118,15 +91,19 @@ class OpenAIConversationAssistant:
                     "role": "system",
                     "content": (
                         "你只负责选择回答当前顾问问题所需的公司原文档。"
-                        "只能从给定相对路径中选择，最多三份；不需要文档就返回空数组。"
-                        '只返回 JSON：{"files":["相对路径"]}。'
+                        "只能从给定文档 ID 中选择，最多三份；不需要文档就返回空数组。"
+                        '只返回 JSON：{"document_ids":["文档 ID"]}。'
                     ),
                 },
                 {
                     "role": "user",
                     "content": (
                         f"当前会话：\n{context.render_for_model()}\n\n"
-                        "可选原文档：\n" + "\n".join(by_name)
+                        "可选原文档（文档 ID\t文件名）：\n"
+                        + "\n".join(
+                            f"{document.doc_id}\t{document.name}"
+                            for document in documents
+                        )
                     ),
                 },
             ],
@@ -134,13 +111,19 @@ class OpenAIConversationAssistant:
             extra_body={"thinking": {"type": "disabled"}},
         )
         payload = json.loads(response.choices[0].message.content)
-        names = payload.get("files")
-        if not isinstance(names, list):
+        doc_ids = payload.get("document_ids")
+        if not isinstance(doc_ids, list):
             raise ValueError("文档路由结果无效")
-        selected: list[Path] = []
-        for name in names[:3]:
-            if isinstance(name, str) and name in by_name and by_name[name] not in selected:
-                selected.append(by_name[name])
+        selected: list[KnowledgeDocument] = []
+        for doc_id in doc_ids:
+            if len(selected) == 3:
+                break
+            if (
+                isinstance(doc_id, str)
+                and doc_id in by_id
+                and by_id[doc_id] not in selected
+            ):
+                selected.append(by_id[doc_id])
         return tuple(selected)
 
     def _respond_with_chat(self, context: ContextPackage) -> str:
@@ -155,70 +138,33 @@ class OpenAIConversationAssistant:
         )
         return response.choices[0].message.content
 
-    def _respond_with_original_documents(
+    def _respond_with_knowledge_documents(
         self,
         context: ContextPackage,
-        documents: tuple[Path, ...],
         *,
-        office_evidence: str | None = None,
+        knowledge_evidence: str | None,
     ) -> str:
-        file_ids: list[str] = []
-        try:
-            for path in documents:
-                if path.suffix.casefold() != ".pdf" or not path.is_file():
-                    raise ValueError("当前只支持上传 PDF 原文档")
-                with path.open("rb") as source:
-                    uploaded = self._client.files.create(
-                        file=source,
-                        purpose="user_data",
-                    )
-                file_ids.append(uploaded.id)
-                self._wait_until_active(uploaded.id)
-            prompt = (
-                f"{_SYSTEM_PROMPT}\n\n"
-                f"当前会话：\n{context.render_for_model()}\n\n"
-                "方舟知识库从本次所选 Office 原文档检索到：\n"
-                f"{office_evidence}"
-                if office_evidence is not None
-                else f"{_SYSTEM_PROMPT}\n\n{context.render_for_model()}"
-            )
-            response = self._client.responses.create(
-                model=self._model,
-                input=[
-                    {
-                        "role": "user",
-                        "content": [
-                            *(
-                                {"type": "input_file", "file_id": file_id}
-                                for file_id in file_ids
-                            ),
-                            {
-                                "type": "input_text",
-                                "text": prompt,
-                            },
-                        ],
-                    }
-                ],
-            )
-            return response.output_text
-        finally:
-            for file_id in file_ids:
-                try:
-                    self._client.files.delete(file_id)
-                except Exception:
-                    pass
-
-    def _wait_until_active(self, file_id: str) -> None:
-        deadline = time.monotonic() + 60
-        while True:
-            status = self._client.files.retrieve(file_id).status
-            if status == "active":
-                return
-            if status in {"failed", "error", "cancelled", "expired"}:
-                raise RuntimeError("方舟未能读取 PDF")
-            if time.monotonic() >= deadline:
-                raise TimeoutError("等待方舟读取 PDF 超时")
-            time.sleep(1)
+        prompt = (
+            f"{_SYSTEM_PROMPT}\n\n"
+            f"当前会话：\n{context.render_for_model()}\n\n"
+            "方舟知识库从本次所选原文档检索到：\n"
+            f"{knowledge_evidence}"
+        )
+        response = self._client.responses.create(
+            model=self._model,
+            input=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": prompt,
+                        },
+                    ],
+                }
+            ],
+        )
+        return response.output_text
 
 
 _SYSTEM_PROMPT = (
@@ -230,5 +176,3 @@ _SYSTEM_PROMPT = (
     "涉及退款、投诉、法律、人身安全、健康、隐私或儿童保护时，不作确定承诺，提示人工核实。"
     "不要假装已经把消息发送给家长。"
 )
-
-_SUPPORTED_FORMATS = frozenset({".pdf", ".docx", ".pptx", ".xlsx"})

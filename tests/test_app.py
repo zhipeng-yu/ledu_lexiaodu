@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QApplication
 from lexiaodu.app import (
     OfflineDemoAssistant,
     _build_conversation_assistant_from_environment,
-    _build_office_reader_from_environment,
+    _build_knowledge_reader_from_environment,
     _configure_application,
     build_parser,
     build_chat_runtime,
@@ -162,7 +162,7 @@ def test_build_assistant_configures_doubao_client(monkeypatch) -> None:
     monkeypatch.setenv("ARK_API_KEY", "test-key")
     monkeypatch.setenv("ARK_MODEL", "doubao-test-model")
     monkeypatch.setenv("ARK_BASE_URL", "https://ark.example/api/v3")
-    office_reader = object()
+    knowledge_reader = object()
     captured = {}
 
     def fake_openai(**kwargs):
@@ -171,8 +171,8 @@ def test_build_assistant_configures_doubao_client(monkeypatch) -> None:
 
     monkeypatch.setattr("lexiaodu.app.OpenAI", fake_openai)
     monkeypatch.setattr(
-        "lexiaodu.app._build_office_reader_from_environment",
-        lambda: office_reader,
+        "lexiaodu.app._build_knowledge_reader_from_environment",
+        lambda: knowledge_reader,
     )
 
     assistant = _build_conversation_assistant_from_environment()
@@ -184,22 +184,22 @@ def test_build_assistant_configures_doubao_client(monkeypatch) -> None:
         "timeout": 30.0,
         "max_retries": 2,
     }
-    assert assistant._office_reader is office_reader
+    assert assistant._knowledge_reader is knowledge_reader
 
 
-def test_office_reader_is_optional_but_rejects_partial_configuration(
+def test_knowledge_reader_is_optional_but_rejects_partial_configuration(
     monkeypatch,
 ) -> None:
     _clear_generator_environment(monkeypatch)
 
-    assert _build_office_reader_from_environment() is None
+    assert _build_knowledge_reader_from_environment() is None
 
     monkeypatch.setenv("VOLC_ACCESSKEY", "access-key")
     with pytest.raises(ValueError, match="VOLC_SECRETKEY"):
-        _build_office_reader_from_environment()
+        _build_knowledge_reader_from_environment()
 
 
-def test_build_office_reader_configures_official_ark_services(monkeypatch) -> None:
+def test_build_knowledge_reader_configures_official_ark_services(monkeypatch) -> None:
     _clear_generator_environment(monkeypatch)
     monkeypatch.setenv("VOLC_ACCESSKEY", "access-key")
     monkeypatch.setenv("VOLC_SECRETKEY", "secret-key")
@@ -220,7 +220,7 @@ def test_build_office_reader_configures_official_ark_services(monkeypatch) -> No
         FakeKnowledgeService,
     )
 
-    reader = _build_office_reader_from_environment()
+    reader = _build_knowledge_reader_from_environment()
 
     assert reader._collection is collection
     assert captured == {
