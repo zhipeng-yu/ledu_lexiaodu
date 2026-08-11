@@ -1,14 +1,14 @@
 # 方舟原文档能力结论
 
-验证日期：2026-08-10。
+更新时间：2026-08-11。
 
 | 格式 | 当前路径 | 结论 |
 |---|---|---|
-| PDF | Files API + Responses API | 可上传原文件并回答；实际调用已成功读取表格和扫描图片，但接口偶发超时，接入时需显示失败并允许重试 |
-| DOCX | 方舟文档知识库 | Files API 不直接支持，需启用知识库原文档上传 |
-| PPTX | 方舟文档知识库 | Files API 不直接支持，需启用知识库原文档上传 |
-| XLSX | 方舟文档知识库 | Files API 不直接支持，需启用知识库结构化文档上传 |
+| PDF | 方舟知识库 | 管理员本地上传后，由应用按云端 `doc_id` 只读检索 |
+| DOCX | 方舟知识库 | 管理员本地上传后，由应用按云端 `doc_id` 只读检索 |
+| PPTX | 方舟知识库 | 管理员本地上传后，由应用按云端 `doc_id` 只读检索 |
+| XLSX | 方舟知识库 | 管理员本地上传后，由应用按云端 `doc_id` 只读检索 |
 
-官方依据：[文件输入(File API)](https://www.volcengine.com/docs/82379/1885708?lang=zh)、[文档知识问答核心流程](https://www.volcengine.com/docs/84313/1254457?lang=zh)。
+应用通过 `list_docs` 发现已解析文档，并在一次 `search_knowledge` 请求中合并所选 `doc_id`。运行时不使用方舟 Files API、TOS 客户端或项目内原文档副本，也不上传、更新或删除知识库文档。`VOLC_ACCESSKEY` 和 `VOLC_SECRETKEY` 仅用于知识库 API 鉴权。
 
-约束：乐小读本地只保存原文件和文件级元数据，不保存由旧知识库生成的 OCR、正文切片或向量文本。方舟仍会在云端解析文件，这是模型读取文档所必需的处理。
+官方依据：[文档知识问答核心流程](https://www.volcengine.com/docs/82379/1261883?lang=zh)、[知识库插件功能说明](https://www.volcengine.com/docs/82379/1528458?lang=zh)。

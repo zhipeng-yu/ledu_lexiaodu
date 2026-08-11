@@ -92,48 +92,13 @@ ARK_KB_HOST=api-knowledgebase.mlp.cn-beijing.volces.com
 - 当前全量自动化测试为 54 项通过。
 - 方舟控制台的知识问答能够依据当前知识库回答二年级数学课程问题。
 - 运营决策：以后从独立备份直接本地上传知识库；TOS 桶由用户自行处理，不纳入乐小读代码或交接任务。
+- 正式运行配置不读取 `TOS_BUCKET`、`TOS_ENDPOINT`，不构造 TOS 客户端，也不扫描、创建或要求 `company_documents/`。
+- `VOLC_ACCESSKEY`、`VOLC_SECRETKEY` 只传给 `VikingKnowledgeBaseService`，用于知识库 API 的 AK/SK 鉴权。
 
-## 7. 下一任务的新窗口提示词
+## 7. 后续维护边界
 
-```text
-请先完整阅读项目根目录 README.md 和 HANDOFF.md，并检查 git status、main 与 origin/main 是否一致。
-
-唯一任务：检查并完成乐小读代码侧“彻底不依赖 TOS 和项目内原文档副本，管理员以后从独立备份直接本地上传方舟知识库”的必要收尾。先核对当前代码、配置、测试和方舟官方正式接口，再决定是否确有代码需要修改；如果当前运行时代码已经满足，不要为了产生改动而重构。
-
-已确认事实：
-- 项目内 company_documents/ 已删除，且已有独立可恢复备份；不要重建或回填该目录。
-- PDF、DOCX、PPTX、XLSX 已全部改为从方舟知识库 list_docs 发现，按云端 doc_id 自动选择并通过一次 search_knowledge 合并检索。
-- 应用不使用方舟 Files API，不上传、更新或删除知识库文档。
-- TOS 桶由用户自行处理；本任务不得查看、修改或删除 TOS 桶及其中对象。
-- 以后由管理员从独立备份直接在方舟控制台本地上传文档。
-- VOLC_ACCESSKEY 和 VOLC_SECRETKEY 是方舟知识库 API 的 AK/SK，仍然需要；不要因为名称含 VOLC 就误删。
-- 纯 Office 最终 Responses 请求已有 120 秒超时处理；包含 PDF 的行为保持当前实现。
-
-严格范围：
-- 只处理与 TOS/本地副本依赖直接相关的必要代码、配置、测试和当前文档残留。
-- 不增加上传按钮，不让应用自动上传文档。
-- 不做本地 OCR、正文提取、文本切段或知识库重建。
-- 不恢复旧 Files API、附件、截图、反馈、旧风险模块或旧知识导入功能。
-- 不删除或改写聊天数据、data/chat.key、.env、独立备份、云端知识库文档或 TOS 数据。
-- 保持多文档单次 search_knowledge，避免 1000029 QPS 限流。
-- 保留现有真实故障区分：目录读取、解析状态、检索空结果、方舟调用异常和 Responses 超时不能混为一类。
-
-成功标准：
-1. 运行时代码与正式配置不依赖 TOS bucket/endpoint/client，也不扫描、创建或要求 company_documents/。
-2. 四种文档在本地无副本、无 TOS 应用配置时仍可从知识库自动选择并回答。
-3. VOLC_ACCESSKEY/VOLC_SECRETKEY 继续仅用于知识库 API 鉴权。
-4. 用 TDD 做实际行为变化；先跑聚焦测试，再跑与风险相称的完整测试和 git diff --check。
-5. 更新 README.md 和 HANDOFF.md，只保留当前事实，不写过程流水账。
-6. 完成后提交 main、推送 GitHub，并确认 HEAD、origin/main 与远端 main 一致。
-```
-
-## 8. 完成检查
-
-- 改动严格对应当前任务，没有恢复旧功能或顺手重构无关代码。
-- PDF、DOCX、PPTX、XLSX 保持统一的只读知识库流程，除非用户明确改变范围。
-- 未删除或改写公司文档、聊天数据、密钥及云端知识库文档。
-- 运行与风险相匹配的最小测试；完成前至少执行 `git diff --check`。
-- 更新 `README.md` 和本文件中的当前状态，删除已经失效的描述，不追加过程流水账。
-- 提交 `main`，推送 GitHub，并确认 `HEAD` 与 `origin/main` 一致。
-
-历史批次、旧 OCR/本地知识库和已删除功能的详细记录不再保留在当前交接中；需要追溯时查阅 Git 历史。
+- PDF、DOCX、PPTX、XLSX 继续使用统一的只读知识库流程；多文档保持单次 `search_knowledge`。
+- 不为应用增加 TOS 或项目内原文档副本依赖，不恢复 Files API 上传、本地 OCR、正文提取、文本切段或知识库重建。
+- 不操作 TOS 桶、独立备份、云端知识库文档、聊天数据、`.env` 或 `data/chat.key`。
+- 排障时继续区分目录读取、解析状态、检索空结果、方舟调用异常和 Responses 超时。
+- 历史批次、旧 OCR/本地知识库和已删除功能的详细记录需要追溯时查阅 Git 历史。

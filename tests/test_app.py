@@ -199,11 +199,15 @@ def test_knowledge_reader_is_optional_but_rejects_partial_configuration(
         _build_knowledge_reader_from_environment()
 
 
-def test_build_knowledge_reader_configures_official_ark_services(monkeypatch) -> None:
+def test_build_knowledge_reader_configures_official_ark_services_without_tos(
+    monkeypatch,
+) -> None:
     _clear_generator_environment(monkeypatch)
     monkeypatch.setenv("VOLC_ACCESSKEY", "access-key")
     monkeypatch.setenv("VOLC_SECRETKEY", "secret-key")
     monkeypatch.setenv("ARK_KB_COLLECTION", "office-originals")
+    monkeypatch.setenv("TOS_BUCKET", "legacy-bucket")
+    monkeypatch.setenv("TOS_ENDPOINT", "https://tos.example")
     captured = {}
     collection = SimpleNamespace(project="default", resource_id="resource-1")
 
