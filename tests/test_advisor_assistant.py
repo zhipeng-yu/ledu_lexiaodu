@@ -75,6 +75,31 @@ class RoutingCompletions:
         )
 
 
+class RoutingThenResponseCompletions:
+    def __init__(self, document_ids: tuple[str, ...], response_content: str) -> None:
+        self.document_ids = document_ids
+        self.response_content = response_content
+        self.options = []
+
+    def create(self, **options):
+        self.options.append(options)
+        content = (
+            json.dumps(
+                {"document_ids": self.document_ids},
+                ensure_ascii=False,
+            )
+            if len(self.options) == 1
+            else self.response_content
+        )
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content=content)
+                )
+            ]
+        )
+
+
 class FakeKnowledgeReader:
     def __init__(self, documents: tuple[KnowledgeDocument, ...]) -> None:
         self.available = documents
@@ -92,6 +117,11 @@ class FakeKnowledgeReader:
         return "\n\n".join(
             f"《{document.name}》\n方舟解析的相关内容" for document in documents
         )
+
+
+class RetrievalForbiddenKnowledgeReader(FakeKnowledgeReader):
+    def retrieve(self, query, documents):
+        raise AssertionError("文档路由返回空数组时不应调用知识检索")
 
 
 class FailingKnowledgeReader(FakeKnowledgeReader):
@@ -133,6 +163,57 @@ def test_doubao_chat_prompt_addresses_consultant_not_parent() -> None:
     assert "正在使用应用并与您对话的人是公司顾问" in system
     assert "家长是顾问需要沟通和服务的对象" in system
     assert "不要把顾问当作或称作家长" in system
+
+
+def test_doubao_prompt_keeps_consultant_out_of_teaching_role_on_both_paths() -> None:
+    message = Message(
+        id="message-role-boundary",
+        conversation_id="conversation-role-boundary",
+        role="user",
+        kind="text",
+        body="线上上课，孩子自控力差，容易走神、摸手机。",
+        request_id="request-role-boundary",
+        in_reply_to_request_id=None,
+        processing_status="processing",
+        created_at=datetime.now(UTC),
+    )
+    context = ContextPackage((message,), 1)
+    chat_completions = FakeCompletions()
+    OpenAIConversationAssistant(
+        SimpleNamespace(chat=SimpleNamespace(completions=chat_completions)),
+        "doubao-test",
+    ).respond(context, "request-role-boundary")
+
+    document = KnowledgeDocument("doc-docx", "线上课程说明.docx")
+    knowledge_responses = FakeResponses()
+    OpenAIConversationAssistant(
+        SimpleNamespace(
+            responses=knowledge_responses,
+            chat=SimpleNamespace(
+                completions=RoutingCompletions(("doc-docx",))
+            ),
+        ),
+        "doubao-test",
+        knowledge_reader=FakeKnowledgeReader((document,)),
+    ).respond(context, "request-role-boundary")
+
+    chat_instructions = chat_completions.options["messages"][0]["content"]
+    knowledge_instructions = knowledge_responses.options["instructions"]
+    assert knowledge_instructions == chat_instructions
+    assert "顾问老师" in chat_instructions
+    assert "不是孩子的授课老师" in chat_instructions
+    assert "课堂盯课" in chat_instructions
+    assert "提醒孩子" in chat_instructions
+    assert "观察课堂表现" in chat_instructions
+    assert "授课" in chat_instructions
+    assert "讲题" in chat_instructions
+    assert "批改作业" in chat_instructions
+    assert "管理纪律" in chat_instructions
+    assert "执行教学干预" in chat_instructions
+    assert "家长话术必须始终站在顾问身份表达" in chat_instructions
+    assert "实际责任人" in chat_instructions
+    assert "有公司知识或实际流程依据" in chat_instructions
+    assert "没有依据时只能提示顾问核实" in chat_instructions
 
 
 def test_doubao_chat_prompt_asks_consultant_only_for_critical_missing_details() -> None:
@@ -228,6 +309,105 @@ def test_doubao_selects_cloud_pdf_and_office_without_local_files_api() -> None:
     assert "timeout" not in responses.options
     assert "课程说明.pdf" in answer
     assert "课程介绍.docx" in answer
+
+
+def test_doubao_gives_direct_advice_when_document_route_is_empty() -> None:
+    document = KnowledgeDocument("doc-docx", "课程政策.docx")
+    reader = RetrievalForbiddenKnowledgeReader((document,))
+    response_content = json.dumps(
+        {
+            "mode": "advice",
+            "consultant_message": "建议先回应孩子的受挫感，再把难题拆成较小步骤。",
+            "questions": [],
+            "parent_message": "能理解孩子遇到难题会有挫败感，可以先从会做的部分开始，再逐步处理卡住的题目。",
+        },
+        ensure_ascii=False,
+    )
+    completions = RoutingThenResponseCompletions((), response_content)
+    assistant = OpenAIConversationAssistant(
+        SimpleNamespace(chat=SimpleNamespace(completions=completions)),
+        "doubao-test",
+        knowledge_reader=reader,
+    )
+    context = ContextPackage(
+        (
+            Message(
+                id="message-homework",
+                conversation_id="conversation-homework",
+                role="user",
+                kind="text",
+                body="课后题太难，孩子做不来。",
+                request_id="request-homework",
+                in_reply_to_request_id=None,
+                processing_status="processing",
+                created_at=datetime.now(UTC),
+            ),
+        ),
+        1,
+    )
+
+    answer = assistant.respond(context, "request-homework")
+
+    assert reader.list_calls == 1
+    assert len(completions.options) == 2
+    assert answer == (
+        "给顾问的建议\n建议先回应孩子的受挫感，再把难题拆成较小步骤。\n\n"
+        "可直接发给家长\n"
+        "能理解孩子遇到难题会有挫败感，可以先从会做的部分开始，再逐步处理卡住的题目。"
+    )
+    assert document.name not in answer
+
+
+def test_doubao_uses_knowledge_document_for_course_policy_facts() -> None:
+    document = KnowledgeDocument("doc-policy", "课程政策.docx")
+    reader = FakeKnowledgeReader((document,))
+    responses = FakeResponses(
+        json.dumps(
+            {
+                "mode": "advice",
+                "consultant_message": "可以依据《课程政策.docx》说明适用的课程政策。",
+                "questions": [],
+                "parent_message": "您好，我根据孩子的情况为您说明适用的课程政策。",
+            },
+            ensure_ascii=False,
+        )
+    )
+    assistant = OpenAIConversationAssistant(
+        SimpleNamespace(
+            responses=responses,
+            chat=SimpleNamespace(
+                completions=RoutingCompletions(("doc-policy",))
+            ),
+        ),
+        "doubao-test",
+        knowledge_reader=reader,
+    )
+    context = ContextPackage(
+        (
+            Message(
+                id="message-policy",
+                conversation_id="conversation-policy",
+                role="user",
+                kind="text",
+                body="家长想了解线上课程的请假和补课政策。",
+                request_id="request-policy",
+                in_reply_to_request_id=None,
+                processing_status="processing",
+                created_at=datetime.now(UTC),
+            ),
+        ),
+        1,
+    )
+
+    answer = assistant.respond(context, "request-policy")
+
+    assert reader.documents == (document,)
+    assert "家长想了解线上课程的请假和补课政策" in reader.query
+    evidence_prompt = responses.options["input"][0]["content"][0]["text"]
+    assert "《课程政策.docx》\n方舟解析的相关内容" in evidence_prompt
+    consultant_text, parent_text = answer.split("可直接发给家长", 1)
+    assert "《课程政策.docx》" in consultant_text
+    assert "课程政策.docx" not in parent_text
 
 
 def test_doubao_knowledge_response_uses_same_consultant_answer_contract() -> None:
