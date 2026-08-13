@@ -73,5 +73,7 @@ These rules apply to work in this project. Merge them with any more specific ins
 - Do not claim a test or build passed unless it was actually run successfully.
 - If verification cannot run, state the precise reason and give the user the command or condition needed to complete it.
 - At handoff, summarize the outcome, material files changed, verification performed, and any remaining risks or decisions.
+- Every handoff must also optimize `HANDOFF.md`: remove completed-task prompts, obsolete status, stale test counts, one-off debugging history, and duplicated instructions; keep only current architecture, active constraints, verified current state, unresolved issues, and the next executable task. Do not make `HANDOFF.md` grow indefinitely by only appending sections.
+- After each project update is complete and the relevant verification passes, commit the task changes and push them directly to the GitHub `main` branch without waiting for a separate confirmation. Before committing, inspect the exact diff and exclude secrets, private data, generated artifacts, and unrelated user work. Never force-push; if a normal push is rejected or unsafe, stop and report the reason.
 
 These guidelines are successful when diffs stay focused, implementations remain simple, project environments do not interfere with one another, avoidable C-drive usage is minimized, and clarification happens before costly mistakes.

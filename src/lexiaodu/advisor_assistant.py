@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Protocol
 
 from .chat_context import ContextPackage
@@ -55,7 +56,10 @@ class OpenAIConversationAssistant:
                     knowledge_evidence=knowledge_evidence,
                 )
                 if selected
-                else self._respond_with_chat(context)
+                else self._respond_with_chat(
+                    context,
+                    force_advice=_requires_business_system_verification(context),
+                )
             )
         except KnowledgeDocumentError as exc:
             return f"{exc}，因此本次不能依据该文档回答公司事实。"
@@ -63,13 +67,32 @@ class OpenAIConversationAssistant:
             raise AdvisorAssistantError("豆包顾问对话失败") from exc
         if not isinstance(content, str) or not content.strip():
             raise AdvisorAssistantError("豆包顾问返回为空")
-        content = content.strip()
+        content = _render_advisor_response(content)
+        if _requires_business_system_verification(context):
+            content = _include_business_system_verification(content)
+        parent_heading = _parent_section_start(content)
+        if parent_heading is not None:
+            consultant_content = content[:parent_heading].rstrip()
+            parent_content = content[parent_heading:].lstrip()
+            for document in selected:
+                parent_content = parent_content.replace(
+                    f"《{document.name}》", "公司资料"
+                ).replace(document.name, "公司资料")
+            content = f"{consultant_content}\n\n{parent_content}"
         missing_names = [
             document.name for document in selected if document.name not in content
         ]
         if missing_names:
             sources = "、".join(f"《{name}》" for name in missing_names)
-            content = f"{content}\n\n依据原文件：{sources}"
+            source_note = f"依据原文件：{sources}"
+            parent_heading = _parent_section_start(content)
+            if parent_heading is None:
+                content = f"{content}\n\n{source_note}"
+            else:
+                content = (
+                    f"{content[:parent_heading].rstrip()}\n\n{source_note}\n\n"
+                    f"{content[parent_heading:].lstrip()}"
+                )
         return content
 
     def _available_documents(self) -> tuple[KnowledgeDocument, ...]:
@@ -127,13 +150,27 @@ class OpenAIConversationAssistant:
                 selected.append(by_id[doc_id])
         return tuple(selected)
 
-    def _respond_with_chat(self, context: ContextPackage) -> str:
+    def _respond_with_chat(
+        self,
+        context: ContextPackage,
+        *,
+        force_advice: bool,
+    ) -> str:
+        schema = _advisor_response_schema(force_advice=force_advice)
         response = self._client.chat.completions.create(
             model=self._model,
             messages=[
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {"role": "user", "content": context.render_for_model()},
             ],
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "advisor_response",
+                    "strict": True,
+                    "schema": schema,
+                },
+            },
             max_tokens=800,
             extra_body={"thinking": {"type": "disabled"}},
         )
@@ -146,14 +183,23 @@ class OpenAIConversationAssistant:
         *,
         knowledge_evidence: str | None,
     ) -> str:
+        schema = _advisor_response_schema(force_advice=True)
         prompt = (
-            f"{_SYSTEM_PROMPT}\n\n"
             f"当前会话：\n{context.render_for_model()}\n\n"
             "方舟知识库从本次所选原文档检索到：\n"
             f"{knowledge_evidence}"
         )
         request = {
             "model": self._model,
+            "instructions": _SYSTEM_PROMPT,
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "advisor_response",
+                    "strict": True,
+                    "schema": schema,
+                }
+            },
             "input": [
                 {
                     "role": "user",
@@ -175,12 +221,131 @@ class OpenAIConversationAssistant:
         return response.output_text
 
 
+def _render_advisor_response(content: str) -> str:
+    try:
+        payload = json.loads(content)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise AdvisorAssistantError("豆包顾问返回结构无效") from exc
+    if not isinstance(payload, dict):
+        raise AdvisorAssistantError("豆包顾问返回结构无效")
+
+    mode = payload.get("mode")
+    consultant_message = payload.get("consultant_message")
+    questions = payload.get("questions")
+    parent_message = payload.get("parent_message")
+    if (
+        mode not in {"clarify", "advice"}
+        or not isinstance(consultant_message, str)
+        or not consultant_message.strip()
+        or not isinstance(questions, list)
+        or any(not isinstance(question, str) or not question.strip() for question in questions)
+        or len(questions) > 2
+        or not isinstance(parent_message, str)
+    ):
+        raise AdvisorAssistantError("豆包顾问返回结构无效")
+
+    consultant_message = consultant_message.strip()
+    if mode == "clarify":
+        if not questions or parent_message.strip():
+            raise AdvisorAssistantError("豆包顾问返回结构无效")
+        rendered_questions = "\n".join(
+            f"{index}. {question.strip()}"
+            for index, question in enumerate(questions, 1)
+        )
+        return f"{consultant_message}\n\n{rendered_questions}"
+
+    if questions or not parent_message.strip():
+        raise AdvisorAssistantError("豆包顾问返回结构无效")
+    return (
+        f"给顾问的建议\n{consultant_message}\n\n"
+        f"可直接发给家长\n{parent_message.strip()}"
+    )
+
+
+def _requires_business_system_verification(context: ContextPackage) -> bool:
+    latest_user_message = next(
+        (message.body.casefold() for message in reversed(context.messages) if message.role == "user"),
+        "",
+    )
+    return any(
+        keyword in latest_user_message
+        for keyword in ("名额", "订单", "付款", "支付", "app", "显示")
+    )
+
+
+def _include_business_system_verification(content: str) -> str:
+    if "业务系统" in content:
+        return content
+    parent_heading = _parent_section_start(content)
+    note = "请先查询业务系统核实名额、订单、付款或 App 显示等实时状态。"
+    if parent_heading is None:
+        return f"{content}\n\n{note}"
+    return (
+        f"{content[:parent_heading].rstrip()}\n\n{note}\n\n"
+        f"{content[parent_heading:].lstrip()}"
+    )
+
+
+def _advisor_response_schema(*, force_advice: bool) -> dict[str, Any]:
+    modes = ["advice"] if force_advice else ["clarify", "advice"]
+    max_questions = 0 if force_advice else 2
+    return {
+        "type": "object",
+        "properties": {
+            "mode": {"type": "string", "enum": modes},
+            "consultant_message": {"type": "string", "minLength": 1},
+            "questions": {
+                "type": "array",
+                "items": {"type": "string"},
+                "maxItems": max_questions,
+            },
+            "parent_message": {
+                "type": "string",
+                "minLength": 1 if force_advice else 0,
+            },
+        },
+        "required": [
+            "mode",
+            "consultant_message",
+            "questions",
+            "parent_message",
+        ],
+    "additionalProperties": False,
+}
+
+def _parent_section_start(content: str) -> int | None:
+    heading = re.search(
+        r"(?m)^[ \t]*(?:#{1,6}[ \t]+)?(?:\*{1,2}|_{1,2})?"
+        r"可直接发给家长[：:]?(?:\*{1,2}|_{1,2})?[：:]?[ \t]*$",
+        content,
+    )
+    return heading.start() if heading is not None else None
+
+
 _SYSTEM_PROMPT = (
-    "你是乐小读，直接和公司顾问讨论家长顾虑。"
-    "你可以独立分析、判断并自然追问，但一次最多追问一个关键问题。"
+    "你是乐小读，是面向公司顾问的沟通助手。"
+    "正在使用应用并与您对话的人是公司顾问；家长是顾问需要沟通和服务的对象。"
+    "始终直接向顾问回答，不要把顾问当作或称作家长，也不要假装直接询问家长。"
+    "你代表公司知识和公司立场，帮助顾问统一话术、处理家长顾虑。"
     "公司事实只能来自明确提供的公司原文档；当前上下文没有依据时，"
-    "要说明待核实，不要编造。引用公司事实时标明文件名，能够识别页码或章节时一并标明。"
+    "要说明待核实，不要编造，也不要用常识补全政策、课程信息或承诺。"
+    "聊天案例只能影响表达方式，不得作为公司事实来源。"
+    "信息不足、缺少会影响建议正确性的关键情况时，向顾问说明还缺什么，"
+    "只向顾问提出一至两个最关键的问题；此时不要输出空泛的家长回复模板。"
+    "信息充分、可以在不编造关键事实的前提下给出建议时，"
+    "consultant_message 简述核心判断，并按需说明公司知识依据、来源文件名、"
+    "适用条件或需核实事项；parent_message 只放一段可独立完整复制的纯文本话术。"
+    "来源文件名只能出现在“给顾问的建议”中；家长话术中不要混入内部分析、来源列表或操作说明。"
+    "表达时先接住顾虑并确认理解，再用短句澄清，把孩子当前情况、方案匹配和下一步连起来；"
+    "语气自然、有礼、不过度施压，不堆砌卖点，不作超出证据的保证。"
+    "引用公司事实时标明文件名，能够识别页码或章节时一并标明。"
     "课程名额、订单、付款和 App 显示等实时状态必须请顾问查询业务系统。"
     "涉及退款、投诉、法律、人身安全、健康、隐私或儿童保护时，不作确定承诺，提示人工核实。"
     "不要假装已经把消息发送给家长。"
+    "请严格按给定 JSON Schema 返回。信息不足时 mode 使用 clarify，"
+    "consultant_message 说明缺口，questions 放一至两个问顾问的问题，parent_message 为空。"
+    "可以给建议时 mode 使用 advice，consultant_message 放顾问说明，questions 为空，"
+    "parent_message 只放可直接发给家长的话术，各字段内不要重复界面标题。"
+    "未知实时状态不等于继续追问顾问，"
+    "应在顾问说明中要求查询业务系统，并在家长话术中说明正在核实而不承诺结果。"
 )

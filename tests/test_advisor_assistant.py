@@ -11,8 +11,17 @@ from lexiaodu.office_documents import KnowledgeDocument, KnowledgeDocumentError
 
 
 class FakeCompletions:
-    def __init__(self) -> None:
+    def __init__(self, content: str | None = None) -> None:
         self.options = None
+        self.content = content or json.dumps(
+            {
+                "mode": "clarify",
+                "consultant_message": "目前还缺少会影响建议判断的具体情况。",
+                "questions": ["请先确认家长具体担心哪一方面？"],
+                "parent_message": "",
+            },
+            ensure_ascii=False,
+        )
 
     def create(self, **options):
         self.options = options
@@ -20,7 +29,7 @@ class FakeCompletions:
             choices=[
                 SimpleNamespace(
                     message=SimpleNamespace(
-                        content="我理解您担心孩子跟不上，我们先确认目前阅读习惯。"
+                        content=self.content
                     )
                 )
             ]
@@ -28,12 +37,21 @@ class FakeCompletions:
 
 
 class FakeResponses:
-    def __init__(self) -> None:
+    def __init__(self, output_text: str | None = None) -> None:
         self.options = None
+        self.output_text = output_text or json.dumps(
+            {
+                "mode": "advice",
+                "consultant_message": "建议先确认孩子当前水平，再结合资料说明安排。",
+                "questions": [],
+                "parent_message": "您好，我们会结合孩子当前情况说明合适的安排。",
+            },
+            ensure_ascii=False,
+        )
 
     def create(self, **options):
         self.options = options
-        return SimpleNamespace(output_text="建议先确认孩子当前阅读水平。")
+        return SimpleNamespace(output_text=self.output_text)
 
 
 class RoutingCompletions:
@@ -83,7 +101,7 @@ class FailingKnowledgeReader(FakeKnowledgeReader):
         )
 
 
-def test_doubao_assistant_uses_conversation_context_as_primary_chat() -> None:
+def _chat_system_prompt() -> str:
     completions = FakeCompletions()
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     assistant = OpenAIConversationAssistant(client, "doubao-test")
@@ -102,16 +120,76 @@ def test_doubao_assistant_uses_conversation_context_as_primary_chat() -> None:
 
     answer = assistant.respond(context, "request-1")
 
-    assert "先确认" in answer
+    assert "目前还缺少" in answer
+    assert "请先确认" in answer
     assert completions.options["model"] == "doubao-test"
     assert "家长担心孩子基础弱" in completions.options["messages"][1]["content"]
-    system = completions.options["messages"][0]["content"]
+    return completions.options["messages"][0]["content"]
+
+
+def test_doubao_chat_prompt_addresses_consultant_not_parent() -> None:
+    system = _chat_system_prompt()
+
+    assert "正在使用应用并与您对话的人是公司顾问" in system
+    assert "家长是顾问需要沟通和服务的对象" in system
+    assert "不要把顾问当作或称作家长" in system
+
+
+def test_doubao_chat_prompt_asks_consultant_only_for_critical_missing_details() -> None:
+    system = _chat_system_prompt()
+
+    assert "信息不足" in system
+    assert "向顾问说明还缺什么" in system
+    assert "一至两个最关键的问题" in system
+    assert "不要假装直接询问家长" in system
+
+
+def test_doubao_chat_prompt_requires_advice_then_copy_ready_parent_text() -> None:
+    system = _chat_system_prompt()
+
+    assert "信息充分" in system
+    assert "给顾问的建议" in system
+    assert "可直接发给家长" in system
+    assert "一段可独立完整复制的纯文本话术" in system
+    assert "内部分析、来源列表或操作说明" in system
+
+
+def test_doubao_chat_prompt_bounds_company_facts_and_case_learning() -> None:
+    system = _chat_system_prompt()
+
     assert "顾问" in system
     assert "公司事实" in system
     assert "不要编造" in system
+    assert "聊天案例只能影响表达方式" in system
+    assert "不得作为公司事实来源" in system
     assert "业务系统" in system
     assert "退款" in system
     assert "文件名" in system
+
+
+def test_doubao_chat_uses_strict_schema_and_renders_clarification() -> None:
+    completions = FakeCompletions()
+    assistant = OpenAIConversationAssistant(
+        SimpleNamespace(chat=SimpleNamespace(completions=completions)),
+        "doubao-test",
+    )
+
+    answer = assistant.respond(ContextPackage((), 1), "request-1")
+
+    assert answer == (
+        "目前还缺少会影响建议判断的具体情况。\n\n"
+        "1. 请先确认家长具体担心哪一方面？"
+    )
+    response_format = completions.options["response_format"]
+    assert response_format["type"] == "json_schema"
+    assert response_format["json_schema"]["strict"] is True
+    schema = response_format["json_schema"]["schema"]
+    assert set(schema["required"]) == {
+        "mode",
+        "consultant_message",
+        "questions",
+        "parent_message",
+    }
 
 
 def test_doubao_selects_cloud_pdf_and_office_without_local_files_api() -> None:
@@ -150,6 +228,268 @@ def test_doubao_selects_cloud_pdf_and_office_without_local_files_api() -> None:
     assert "timeout" not in responses.options
     assert "课程说明.pdf" in answer
     assert "课程介绍.docx" in answer
+
+
+def test_doubao_knowledge_response_uses_same_consultant_answer_contract() -> None:
+    document = KnowledgeDocument("doc-docx", "课程介绍.docx")
+    reader = FakeKnowledgeReader((document,))
+    responses = FakeResponses(
+        json.dumps(
+            {
+                "mode": "advice",
+                "consultant_message": "可以依据《课程介绍.docx》说明。",
+                "questions": [],
+                "parent_message": "您好，可以结合孩子情况了解课程安排。",
+            },
+            ensure_ascii=False,
+        )
+    )
+    assistant = OpenAIConversationAssistant(
+        SimpleNamespace(
+            responses=responses,
+            chat=SimpleNamespace(
+                completions=RoutingCompletions(("doc-docx",))
+            ),
+        ),
+        "doubao-test",
+        knowledge_reader=reader,
+    )
+
+    assistant.respond(ContextPackage((), 1), "request-1")
+
+    instructions = responses.options["instructions"]
+    prompt = responses.options["input"][0]["content"][0]["text"]
+    assert "正在使用应用并与您对话的人是公司顾问" in instructions
+    assert "一至两个最关键的问题" in instructions
+    assert "给顾问的建议" in instructions
+    assert "可直接发给家长" in instructions
+    assert "来源文件名只能出现在“给顾问的建议”" in instructions
+    assert "不要编造" in instructions
+    assert "正在使用应用并与您对话的人是公司顾问" not in prompt
+    assert "方舟知识库" in prompt
+    response_format = responses.options["text"]["format"]
+    assert response_format["type"] == "json_schema"
+    assert response_format["strict"] is True
+    schema = response_format["schema"]
+    assert schema["properties"]["mode"]["enum"] == ["advice"]
+    assert schema["properties"]["questions"]["maxItems"] == 0
+    assert schema["properties"]["consultant_message"]["minLength"] == 1
+    assert schema["properties"]["parent_message"]["minLength"] == 1
+
+
+def test_doubao_realtime_status_forces_advice_with_business_system_verification() -> None:
+    completions = FakeCompletions(
+        json.dumps(
+            {
+                "mode": "advice",
+                "consultant_message": "需要先核实名额和订单状态。",
+                "questions": [],
+                "parent_message": "您好，我正在为您核实名额和订单状态，确认后及时同步。",
+            },
+            ensure_ascii=False,
+        )
+    )
+    assistant = OpenAIConversationAssistant(
+        SimpleNamespace(chat=SimpleNamespace(completions=completions)),
+        "doubao-test",
+    )
+    context = ContextPackage(
+        (
+            Message(
+                id="message-realtime",
+                conversation_id="conversation-realtime",
+                role="user",
+                kind="text",
+                body="家长问今天是否还有名额，订单付款后 App 还没显示。",
+                request_id="request-realtime",
+                in_reply_to_request_id=None,
+                processing_status="processing",
+                created_at=datetime.now(UTC),
+            ),
+        ),
+        1,
+    )
+
+    answer = assistant.respond(context, "request-realtime")
+
+    response_format = completions.options["response_format"]
+    schema = response_format["json_schema"]["schema"]
+    assert schema["properties"]["mode"]["enum"] == ["advice"]
+    assert schema["properties"]["questions"]["maxItems"] == 0
+    assert schema["properties"]["consultant_message"]["minLength"] == 1
+    assert schema["properties"]["parent_message"]["minLength"] == 1
+    assert answer.startswith("给顾问的建议\n")
+    assert "业务系统" in answer
+    assert "\n\n可直接发给家长\n" in answer
+
+
+def test_doubao_knowledge_renders_advice_and_copy_ready_parent_text() -> None:
+    document = KnowledgeDocument("doc-docx", "课程介绍.docx")
+    reader = FakeKnowledgeReader((document,))
+    responses = FakeResponses(
+        json.dumps(
+            {
+                "mode": "advice",
+                "consultant_message": "可以依据资料说明课程安排。",
+                "questions": [],
+                "parent_message": "您好，课程会结合孩子当前情况安排。",
+            },
+            ensure_ascii=False,
+        )
+    )
+    assistant = OpenAIConversationAssistant(
+        SimpleNamespace(
+            responses=responses,
+            chat=SimpleNamespace(
+                completions=RoutingCompletions(("doc-docx",))
+            ),
+        ),
+        "doubao-test",
+        knowledge_reader=reader,
+    )
+
+    answer = assistant.respond(ContextPackage((), 1), "request-1")
+
+    assert answer == (
+        "给顾问的建议\n可以依据资料说明课程安排。\n\n"
+        "依据原文件：《课程介绍.docx》\n\n"
+        "可直接发给家长\n您好，课程会结合孩子当前情况安排。"
+    )
+
+
+def test_missing_source_names_are_inserted_before_copy_ready_parent_text() -> None:
+    document = KnowledgeDocument("doc-docx", "课程介绍.docx")
+    reader = FakeKnowledgeReader((document,))
+    responses = FakeResponses(
+        json.dumps(
+            {
+                "mode": "advice",
+                "consultant_message": "可以依据公司资料说明课程安排。",
+                "questions": [],
+                "parent_message": "您好，课程会结合孩子当前情况安排。",
+            },
+            ensure_ascii=False,
+        )
+    )
+    assistant = OpenAIConversationAssistant(
+        SimpleNamespace(
+            responses=responses,
+            chat=SimpleNamespace(
+                completions=RoutingCompletions(("doc-docx",))
+            ),
+        ),
+        "doubao-test",
+        knowledge_reader=reader,
+    )
+
+    answer = assistant.respond(ContextPackage((), 1), "request-1")
+
+    consultant_text, parent_text = answer.split("可直接发给家长", 1)
+    assert "依据原文件：《课程介绍.docx》" in consultant_text
+    assert "课程介绍.docx" not in parent_text
+
+
+def test_source_names_in_parent_text_are_moved_to_consultant_advice() -> None:
+    document = KnowledgeDocument("doc-docx", "课程介绍.docx")
+    reader = FakeKnowledgeReader((document,))
+    responses = FakeResponses(
+        json.dumps(
+            {
+                "mode": "advice",
+                "consultant_message": "可以说明课程安排。",
+                "questions": [],
+                "parent_message": "您好，根据《课程介绍.docx》，课程会结合孩子情况安排。",
+            },
+            ensure_ascii=False,
+        )
+    )
+    assistant = OpenAIConversationAssistant(
+        SimpleNamespace(
+            responses=responses,
+            chat=SimpleNamespace(
+                completions=RoutingCompletions(("doc-docx",))
+            ),
+        ),
+        "doubao-test",
+        knowledge_reader=reader,
+    )
+
+    answer = assistant.respond(ContextPackage((), 1), "request-1")
+
+    consultant_text, parent_text = answer.split("可直接发给家长", 1)
+    assert "依据原文件：《课程介绍.docx》" in consultant_text
+    assert "课程介绍.docx" not in parent_text
+    assert "公司资料" in parent_text
+
+
+def test_parent_section_requires_a_standalone_heading() -> None:
+    document = KnowledgeDocument("doc-docx", "课程介绍.docx")
+    reader = FakeKnowledgeReader((document,))
+    responses = FakeResponses(
+        json.dumps(
+            {
+                "mode": "advice",
+                "consultant_message": (
+                    "建议准备一段可直接发给家长的话术，"
+                    "依据《课程介绍.docx》说明课程安排。"
+                ),
+                "questions": [],
+                "parent_message": "您好，可以结合孩子情况了解课程安排。",
+            },
+            ensure_ascii=False,
+        )
+    )
+    assistant = OpenAIConversationAssistant(
+        SimpleNamespace(
+            responses=responses,
+            chat=SimpleNamespace(
+                completions=RoutingCompletions(("doc-docx",))
+            ),
+        ),
+        "doubao-test",
+        knowledge_reader=reader,
+    )
+
+    answer = assistant.respond(ContextPackage((), 1), "request-1")
+
+    assert "《课程介绍.docx》" in answer
+    assert "依据原文件：《课程介绍.docx》" not in answer
+
+
+def test_parent_message_cannot_move_its_source_into_a_nested_heading() -> None:
+    document = KnowledgeDocument("doc-docx", "课程介绍.docx")
+    reader = FakeKnowledgeReader((document,))
+    responses = FakeResponses(
+        json.dumps(
+            {
+                "mode": "advice",
+                "consultant_message": "可以说明课程安排。",
+                "questions": [],
+                "parent_message": (
+                    "**可直接发给家长：**\n"
+                    "您好，根据《课程介绍.docx》说明课程安排。"
+                ),
+            },
+            ensure_ascii=False,
+        )
+    )
+    assistant = OpenAIConversationAssistant(
+        SimpleNamespace(
+            responses=responses,
+            chat=SimpleNamespace(
+                completions=RoutingCompletions(("doc-docx",))
+            ),
+        ),
+        "doubao-test",
+        knowledge_reader=reader,
+    )
+
+    answer = assistant.respond(ContextPackage((), 1), "request-1")
+
+    consultant_text, parent_text = answer.split("可直接发给家长", 1)
+    assert "依据原文件：《课程介绍.docx》" in consultant_text
+    assert "课程介绍.docx" not in parent_text
+    assert "公司资料" in parent_text
 
 
 def test_doubao_allows_office_knowledge_response_to_exceed_default_timeout() -> None:
