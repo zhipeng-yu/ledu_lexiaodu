@@ -10,15 +10,20 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QBuffer, QIODevice, QObject, Signal
+from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from lexiaodu.chat_context import ContextBuilder, ContextPackage
 from lexiaodu.chat_controller import ChatController
 from lexiaodu.chat_repository import ConversationRepository
-from lexiaodu.chat_window import ChatConversationView, ChatTurnView
+from lexiaodu.chat_window import (
+    ChatConversationView,
+    ChatTurnView,
+    ScreenshotDraft,
+)
 from lexiaodu.local_crypto import DataCipher
-from lexiaodu.screenshot_store import ScreenshotStore
+from lexiaodu.screenshot_store import ScreenshotCorrupt, ScreenshotStore
 
 
 class FakeWindow(QObject):
@@ -28,6 +33,7 @@ class FakeWindow(QObject):
     delete_conversation_requested = Signal(str)
     search_requested = Signal(str)
     send_requested = Signal(str)
+    send_image_requested = Signal(str, object)
     retry_requested = Signal(str)
 
     def __init__(self) -> None:
@@ -151,14 +157,18 @@ def repository_at(path: Path) -> ConversationRepository:
     return ConversationRepository(path, DataCipher(b"c" * 32))
 
 
-def context_builder(repository: Any) -> ContextBuilder:
+def screenshot_store(repository: Any) -> ScreenshotStore:
+    return ScreenshotStore(
+        repository._database_path.with_name("chat-images"),
+        repository,
+        DataCipher(b"c" * 32),
+    )
+
+
+def context_builder(repository: Any, store: ScreenshotStore) -> ContextBuilder:
     return ContextBuilder(
         repository,
-        ScreenshotStore(
-            repository._database_path.with_name("chat-images"),
-            repository,
-            DataCipher(b"c" * 32),
-        ),
+        store,
         character_budget=10_000,
     )
 
@@ -175,10 +185,12 @@ def test_send_persists_before_assistant_and_background_result_stays_with_owner(
     assistant = RecordingAssistant(real_repository, ["FIRST-ANSWER"], events)
     assistant_executor = ManualExecutor()
     window = FakeWindow()
+    store = screenshot_store(repository)
     ChatController(
         window,
         repository,
-        context_builder(repository),
+        context_builder(repository, store),
+        store,
         assistant,
         assistant_executor,
     )
@@ -212,10 +224,12 @@ def test_assistant_failure_marks_the_existing_request_failed(
     assistant = RecordingAssistant(repository, [RuntimeError("offline")])
     assistant_executor = ManualExecutor()
     window = FakeWindow()
+    store = screenshot_store(repository)
     ChatController(
         window,
         repository,
-        context_builder(repository),
+        context_builder(repository, store),
+        store,
         assistant,
         assistant_executor,
     )
@@ -245,10 +259,12 @@ def test_retry_reuses_request_id_and_repeated_retry_cannot_add_two_answers(
     )
     assistant_executor = ManualExecutor()
     window = FakeWindow()
+    store = screenshot_store(repository)
     ChatController(
         window,
         repository,
-        context_builder(repository),
+        context_builder(repository, store),
+        store,
         assistant,
         assistant_executor,
     )
@@ -306,10 +322,12 @@ def test_reconstruction_shows_unfinished_request_without_auto_sending(
     assistant = RecordingAssistant(reopened, ["MUST-NOT-RUN"])
     assistant_executor = ManualExecutor()
     window = FakeWindow()
+    store = screenshot_store(reopened)
     ChatController(
         window,
         reopened,
-        context_builder(reopened),
+        context_builder(reopened, store),
+        store,
         assistant,
         assistant_executor,
     )
@@ -329,10 +347,12 @@ def _workspace_controller(
 ) -> tuple[ChatController, FakeWindow, ConversationRepository]:
     repository = repository_at(tmp_path / "chat.sqlite3")
     window = FakeWindow()
+    store = screenshot_store(repository)
     controller = ChatController(
         window,
         repository,
-        context_builder(repository),
+        context_builder(repository, store),
+        store,
         RecordingAssistant(repository, []),
         ManualExecutor(),
     )
@@ -414,4 +434,219 @@ def test_delete_intent_removes_conversation_and_refreshes_ui(
     assert repository.list_conversations() == ()
     assert window.conversations == ()
     assert window.active_conversation_id is None
+    controller.shutdown()
+
+
+def test_image_is_persisted_before_assistant_and_retry_reuses_it(
+    tmp_path: Path,
+) -> None:
+    application()
+    repository = repository_at(tmp_path / "chat.sqlite3")
+    store = screenshot_store(repository)
+    conversation = repository.create_conversation("image")
+    window = FakeWindow()
+    assistant = RecordingAssistant(repository, [RuntimeError("offline"), "OK"])
+    executor = ManualExecutor()
+    ChatController(
+        window,
+        repository,
+        context_builder(repository, store),
+        store,
+        assistant,
+        executor,
+    )
+    window.select(conversation.id)
+    draft = ScreenshotDraft(b"PNG-DATA", "image/png", 20, 400)
+
+    window.send_image_requested.emit("", draft)
+    request = repository.list_messages(conversation.id)[0]
+    assert store.load_for_message(conversation.id, request.id).data == b"PNG-DATA"
+    executor.run_next()
+    window.retry_requested.emit(request.request_id)
+    executor.run_next()
+
+    assert [call[0].image.data for call in assistant.calls] == [
+        b"PNG-DATA",
+        b"PNG-DATA",
+    ]
+
+
+def test_image_save_failure_removes_pending_request_and_does_not_dispatch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    application()
+    repository = repository_at(tmp_path / "chat.sqlite3")
+    store = screenshot_store(repository)
+    conversation = repository.create_conversation("image")
+    window = FakeWindow()
+    assistant = RecordingAssistant(repository, ["MUST-NOT-RUN"])
+    executor = ManualExecutor()
+    ChatController(
+        window,
+        repository,
+        context_builder(repository, store),
+        store,
+        assistant,
+        executor,
+    )
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(store, "save", lambda *_args: (_ for _ in ()).throw(OSError()))
+    monkeypatch.setattr(
+        "lexiaodu.chat_controller.QMessageBox.warning",
+        lambda _window, title, body: warnings.append((title, body)),
+    )
+
+    window.select(conversation.id)
+    window.send_image_requested.emit("caption", ScreenshotDraft(b"data", "image/png", 1, 1))
+
+    assert repository.list_messages(conversation.id) == ()
+    assert executor.pending == []
+    assert warnings == [("截图发送失败", "截图未能安全保存")]
+
+
+def test_image_context_stays_with_its_owner_conversation(
+    tmp_path: Path,
+) -> None:
+    application()
+    repository = repository_at(tmp_path / "chat.sqlite3")
+    store = screenshot_store(repository)
+    first = repository.create_conversation("first")
+    second = repository.create_conversation("second")
+    window = FakeWindow()
+    assistant = RecordingAssistant(repository, ["OK"])
+    executor = ManualExecutor()
+    ChatController(
+        window,
+        repository,
+        context_builder(repository, store),
+        store,
+        assistant,
+        executor,
+    )
+
+    window.select(first.id)
+    window.send_image_requested.emit("", ScreenshotDraft(b"owned", "image/png", 1, 1))
+    window.select(second.id)
+    executor.run_next()
+
+    assert assistant.calls[0][0].image.data == b"owned"
+    assert window.active_conversation_id == second.id
+    assert repository.list_messages(second.id) == ()
+
+
+def test_delete_conversation_removes_only_its_screenshot(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    application()
+    repository = repository_at(tmp_path / "chat.sqlite3")
+    store = screenshot_store(repository)
+    first = repository.create_conversation("first")
+    second = repository.create_conversation("second")
+    first_message = repository.append_user_message(first.id, "first", request_id="first")
+    second_message = repository.append_user_message(second.id, "second", request_id="second")
+    first_attachment = store.save(first.id, first_message.id, b"first", "image/png", 1, 1)
+    second_attachment = store.save(second.id, second_message.id, b"second", "image/png", 1, 1)
+    window = FakeWindow()
+    controller = ChatController(
+        window,
+        repository,
+        context_builder(repository, store),
+        store,
+        RecordingAssistant(repository, []),
+        ManualExecutor(),
+    )
+    monkeypatch.setattr(
+        "lexiaodu.chat_controller.QMessageBox.question",
+        lambda *_args: QMessageBox.StandardButton.Yes,
+    )
+
+    window.select(first.id)
+    window.delete_conversation_requested.emit(first.id)
+
+    assert not first_attachment.encrypted_path.exists()
+    assert second_attachment.encrypted_path.exists()
+    assert [conversation.id for conversation in repository.list_conversations()] == [second.id]
+    controller.shutdown()
+
+
+@pytest.mark.parametrize("failure", [OSError(), ScreenshotCorrupt("bad")])
+def test_delete_image_failure_keeps_conversation_visible(
+    tmp_path: Path,
+    monkeypatch,
+    failure: Exception,
+) -> None:
+    application()
+    repository = repository_at(tmp_path / "chat.sqlite3")
+    store = screenshot_store(repository)
+    conversation = repository.create_conversation("keep")
+    window = FakeWindow()
+    controller = ChatController(
+        window,
+        repository,
+        context_builder(repository, store),
+        store,
+        RecordingAssistant(repository, []),
+        ManualExecutor(),
+    )
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "lexiaodu.chat_controller.QMessageBox.question",
+        lambda *_args: QMessageBox.StandardButton.Yes,
+    )
+    monkeypatch.setattr(store, "remove_for_conversation", lambda _id: (_ for _ in ()).throw(failure))
+    monkeypatch.setattr(
+        "lexiaodu.chat_controller.QMessageBox.warning",
+        lambda _window, title, body: warnings.append((title, body)),
+    )
+
+    window.select(conversation.id)
+    window.delete_conversation_requested.emit(conversation.id)
+
+    assert repository.get_conversation(conversation.id).id == conversation.id
+    assert window.active_conversation_id == conversation.id
+    assert warnings == [("删除失败", "截图文件未能删除，会话已保留")]
+    controller.shutdown()
+
+
+def test_history_reconstruction_shows_thumbnail_and_unavailable_marker(
+    tmp_path: Path,
+) -> None:
+    application()
+    repository = repository_at(tmp_path / "chat.sqlite3")
+    store = screenshot_store(repository)
+    conversation = repository.create_conversation("history")
+    valid = repository.append_user_message(
+        conversation.id, "valid", request_id="valid", kind="image"
+    )
+    corrupt = repository.append_user_message(
+        conversation.id, "corrupt", request_id="corrupt", kind="image"
+    )
+    image = QImage(1, 1, QImage.Format.Format_RGBA8888)
+    image.fill(0)
+    buffer = QBuffer()
+    buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+    assert image.save(buffer, "PNG")
+    png = bytes(buffer.data())
+    store.save(conversation.id, valid.id, png, "image/png", 1, 1)
+    corrupt_attachment = store.save(conversation.id, corrupt.id, png, "image/png", 1, 1)
+    corrupt_attachment.encrypted_path.write_bytes(b"corrupt")
+    reopened = repository_at(tmp_path / "chat.sqlite3")
+    reopened_store = screenshot_store(reopened)
+    window = FakeWindow()
+    controller = ChatController(
+        window,
+        reopened,
+        context_builder(reopened, reopened_store),
+        reopened_store,
+        RecordingAssistant(reopened, []),
+        ManualExecutor(),
+    )
+
+    window.select(conversation.id)
+
+    assert window.turns[0].image is not None and not window.turns[0].image.isNull()
+    assert window.turns[1].image is None
+    assert window.turns[1].text == "corrupt（截图无法读取）"
     controller.shutdown()

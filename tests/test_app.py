@@ -265,6 +265,11 @@ def test_build_chat_runtime_shows_chat_window_with_single_assistant_worker(
         assert isinstance(runtime.window, ChatMainWindow)
         assert runtime.window.isVisible()
         assert runtime.assistant_executor._max_workers == 1
+        assert runtime.controller._screenshot_store._root == tmp_path / "chat-images"
+        assert (
+            runtime.context_builder._screenshot_store
+            is runtime.controller._screenshot_store
+        )
     finally:
         runtime.controller.shutdown()
         runtime.window.close()

@@ -156,7 +156,7 @@ def build_chat_runtime(
     cipher = DataCipher.open(settings.chat.database_path.with_suffix(".key"))
     repository = ConversationRepository(settings.chat.database_path, cipher)
     screenshot_store = ScreenshotStore(
-        settings.chat.database_path.with_name("chat-images"), repository, cipher
+        settings.chat.database_path.parent / "chat-images", repository, cipher
     )
     context_builder = ContextBuilder(
         repository,
@@ -173,6 +173,7 @@ def build_chat_runtime(
             window,
             repository,
             context_builder,
+            screenshot_store,
             assistant,
             assistant_executor,
         )

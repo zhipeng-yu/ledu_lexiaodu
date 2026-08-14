@@ -5,15 +5,18 @@ from typing import Protocol
 from uuid import uuid4
 
 from PySide6.QtCore import QObject, Signal, Slot
+from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QInputDialog, QMessageBox
 
 from lexiaodu.chat_window import (
     ChatConversationView,
     ChatMainWindow,
     ChatTurnView,
+    ScreenshotDraft,
 )
 from lexiaodu.chat_context import ContextBuilder, ContextPackage
 from lexiaodu.chat_repository import ConversationRepository, Message
+from lexiaodu.screenshot_store import ScreenshotCorrupt, ScreenshotStore
 
 
 class ConversationAssistant(Protocol):
@@ -30,6 +33,7 @@ class ChatController(QObject):
         window: ChatMainWindow,
         repository: ConversationRepository,
         context_builder: ContextBuilder,
+        screenshot_store: ScreenshotStore,
         assistant: ConversationAssistant,
         assistant_executor: Executor,
     ) -> None:
@@ -37,6 +41,7 @@ class ChatController(QObject):
         self._window = window
         self._repository = repository
         self._context_builder = context_builder
+        self._screenshot_store = screenshot_store
         self._assistant = assistant
         self._assistant_executor = assistant_executor
         self._shutting_down = False
@@ -48,6 +53,7 @@ class ChatController(QObject):
         window.delete_conversation_requested.connect(self.delete_conversation)
         window.search_requested.connect(self.search_conversations)
         window.send_requested.connect(self.send_message)
+        window.send_image_requested.connect(self.send_image_message)
         window.retry_requested.connect(self.retry_request)
 
         self._refresh_conversations()
@@ -105,6 +111,15 @@ class ChatController(QObject):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
+        try:
+            self._screenshot_store.remove_for_conversation(conversation_id)
+        except (OSError, ScreenshotCorrupt):
+            QMessageBox.warning(
+                self._window,
+                "删除失败",
+                "截图文件未能删除，会话已保留",
+            )
+            return
         self._repository.delete_conversation(conversation_id)
         self._refresh_conversations()
 
@@ -132,14 +147,31 @@ class ChatController(QObject):
             tuple(self._turn_view(message) for message in messages),
         )
 
-    @staticmethod
-    def _turn_view(message: Message) -> ChatTurnView:
+    def _turn_view(self, message: Message) -> ChatTurnView:
+        text = message.body
+        image: QImage | None = None
+        try:
+            payload = self._screenshot_store.load_for_message(
+                message.conversation_id,
+                message.id,
+            )
+            if payload is not None:
+                image = QImage.fromData(payload.data)
+                if image.isNull():
+                    image = None
+                    text += "（截图无法读取）"
+            elif message.kind == "image":
+                text += "（截图无法读取）"
+        except (OSError, ScreenshotCorrupt):
+            text += "（截图无法读取）"
         return ChatTurnView(
             id=message.id,
             role=message.role,
-            text=message.body,
+            text=text,
             request_id=message.request_id,
             status=message.processing_status,
+            kind=message.kind,
+            image=image,
         )
 
     @Slot(str)
@@ -154,6 +186,41 @@ class ChatController(QObject):
             request_id=uuid4().hex,
             kind="text",
         )
+
+    @Slot(str, object)
+    def send_image_message(self, text: str, draft: ScreenshotDraft) -> None:
+        conversation_id = self._window.active_conversation_id
+        if conversation_id is None or self._shutting_down:
+            return
+        request_id = uuid4().hex
+        message = self._repository.append_user_message(
+            conversation_id,
+            text.strip() or "聊天截图",
+            request_id=request_id,
+            kind="image",
+        )
+        try:
+            self._screenshot_store.save(
+                conversation_id,
+                message.id,
+                draft.data,
+                draft.mime_type,
+                draft.width,
+                draft.height,
+            )
+        except Exception:
+            self._repository.delete_pending_user_request(
+                conversation_id,
+                request_id,
+            )
+            QMessageBox.warning(
+                self._window,
+                "截图发送失败",
+                "截图未能安全保存",
+            )
+            return
+        self._show_if_active(conversation_id)
+        self._dispatch_request(conversation_id, request_id, message.body)
 
     def _start_new_request(
         self,
@@ -204,7 +271,10 @@ class ChatController(QObject):
             )
             if request.processing_status == "completed":
                 return
-            context = self._context_builder.build(conversation_id)
+            context = self._context_builder.build(
+                conversation_id,
+                request_message_id=request.message_id,
+            )
             future = self._assistant_executor.submit(
                 self._assistant.respond,
                 context,
