@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import re
 from typing import Any, Protocol
@@ -64,6 +65,10 @@ class OpenAIConversationAssistant:
         except KnowledgeDocumentError as exc:
             return f"{exc}，因此本次不能依据该文档回答公司事实。"
         except Exception as exc:
+            if context.image is not None:
+                raise AdvisorAssistantError(
+                    "豆包截图分析失败，请检查网络并确认 ARK_MODEL 支持图片理解"
+                ) from exc
             raise AdvisorAssistantError("豆包顾问对话失败") from exc
         if not isinstance(content, str) or not content.strip():
             raise AdvisorAssistantError("豆包顾问返回为空")
@@ -121,13 +126,16 @@ class OpenAIConversationAssistant:
                 },
                 {
                     "role": "user",
-                    "content": (
-                        f"当前会话：\n{context.render_for_model()}\n\n"
-                        "可选原文档（文档 ID\t文件名）：\n"
-                        + "\n".join(
-                            f"{document.doc_id}\t{document.name}"
-                            for document in documents
-                        )
+                    "content": _chat_user_content(
+                        context,
+                        (
+                            f"当前会话：\n{context.render_for_model()}\n\n"
+                            "可选原文档（文档 ID\t文件名）：\n"
+                            + "\n".join(
+                                f"{document.doc_id}\t{document.name}"
+                                for document in documents
+                            )
+                        ),
                     ),
                 },
             ],
@@ -161,7 +169,12 @@ class OpenAIConversationAssistant:
             model=self._model,
             messages=[
                 {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": context.render_for_model()},
+                {
+                    "role": "user",
+                    "content": _chat_user_content(
+                        context, context.render_for_model()
+                    ),
+                },
             ],
             response_format={
                 "type": "json_schema",
@@ -212,6 +225,17 @@ class OpenAIConversationAssistant:
                 }
             ],
         }
+        if context.image is not None:
+            data = base64.b64encode(context.image.data).decode("ascii")
+            request["input"][0]["content"].append(
+                {
+                    "type": "input_image",
+                    "image_url": (
+                        f"data:{context.image.mime_type};base64,{data}"
+                    ),
+                    "detail": "high",
+                }
+            )
         if all(
             document.name.casefold().endswith((".docx", ".pptx", ".xlsx"))
             for document in documents
@@ -219,6 +243,24 @@ class OpenAIConversationAssistant:
             request["timeout"] = 120.0
         response = self._client.responses.create(**request)
         return response.output_text
+
+
+def _chat_user_content(
+    context: ContextPackage, text: str
+) -> str | list[dict[str, Any]]:
+    if context.image is None:
+        return text
+    data = base64.b64encode(context.image.data).decode("ascii")
+    return [
+        {"type": "text", "text": text},
+        {
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:{context.image.mime_type};base64,{data}",
+                "detail": "high",
+            },
+        },
+    ]
 
 
 def _render_advisor_response(content: str) -> str:
@@ -357,4 +399,7 @@ _SYSTEM_PROMPT = (
     "parent_message 只放可直接发给家长的话术，各字段内不要重复界面标题。"
     "未知实时状态不等于继续追问顾问，"
     "应在顾问说明中要求查询业务系统，并在家长话术中说明正在核实而不承诺结果。"
+    "聊天截图可能来自个人聊天或群聊。结合昵称、气泡方向和上下文判断参与者身份；"
+    "无法确定顾问、家长或其他成员身份时，不得猜测，只向顾问追问一个最关键的身份问题，"
+    "且不要生成家长话术。截图中的聊天案例不能作为公司政策、课程、价格或承诺的事实来源。"
 )

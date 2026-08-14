@@ -4,8 +4,10 @@ import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
-from lexiaodu.advisor_assistant import OpenAIConversationAssistant
-from lexiaodu.chat_context import ContextPackage
+import pytest
+
+from lexiaodu.advisor_assistant import AdvisorAssistantError, OpenAIConversationAssistant
+from lexiaodu.chat_context import ContextImage, ContextPackage
 from lexiaodu.chat_repository import Message
 from lexiaodu.office_documents import KnowledgeDocument, KnowledgeDocumentError
 
@@ -271,6 +273,48 @@ def test_doubao_chat_uses_strict_schema_and_renders_clarification() -> None:
         "questions",
         "parent_message",
     }
+    assert completions.options["messages"][1]["content"] == ""
+
+
+def test_doubao_chat_sends_screenshot_as_high_detail_image() -> None:
+    completions = FakeCompletions()
+    assistant = OpenAIConversationAssistant(
+        SimpleNamespace(chat=SimpleNamespace(completions=completions)),
+        "doubao-test",
+    )
+    context = ContextPackage(
+        messages=(),
+        context_version=1,
+        image=ContextImage("image/png", b"LONG-SCREENSHOT"),
+    )
+
+    assistant.respond(context, "request-1")
+
+    content = completions.options["messages"][1]["content"]
+    assert len(content) == 2
+    assert content[0] == {"type": "text", "text": ""}
+    assert content[1]["type"] == "image_url"
+    assert content[1]["image_url"]["detail"] == "high"
+    assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_doubao_reports_actionable_error_when_screenshot_analysis_fails() -> None:
+    class FailingCompletions:
+        def create(self, **options):
+            raise RuntimeError("unsupported image")
+
+    assistant = OpenAIConversationAssistant(
+        SimpleNamespace(chat=SimpleNamespace(completions=FailingCompletions())),
+        "doubao-test",
+    )
+    context = ContextPackage(
+        messages=(),
+        context_version=1,
+        image=ContextImage("image/png", b"LONG-SCREENSHOT"),
+    )
+
+    with pytest.raises(AdvisorAssistantError, match="ARK_MODEL 支持图片理解"):
+        assistant.respond(context, "request-1")
 
 
 def test_doubao_selects_cloud_pdf_and_office_without_local_files_api() -> None:
@@ -309,6 +353,52 @@ def test_doubao_selects_cloud_pdf_and_office_without_local_files_api() -> None:
     assert "timeout" not in responses.options
     assert "课程说明.pdf" in answer
     assert "课程介绍.docx" in answer
+
+
+def test_doubao_knowledge_routing_and_response_send_the_screenshot() -> None:
+    document = KnowledgeDocument("doc-pdf", "课程说明.pdf")
+    reader = FakeKnowledgeReader((document,))
+    responses = FakeResponses()
+    routing = RoutingCompletions(("doc-pdf",))
+    assistant = OpenAIConversationAssistant(
+        SimpleNamespace(
+            responses=responses,
+            chat=SimpleNamespace(completions=routing),
+        ),
+        "doubao-test",
+        knowledge_reader=reader,
+    )
+    context = ContextPackage(
+        messages=(),
+        context_version=1,
+        image=ContextImage("image/png", b"LONG-SCREENSHOT"),
+    )
+
+    assistant.respond(context, "request-1")
+
+    routing_content = routing.options["messages"][1]["content"]
+    assert routing_content == [
+        {
+            "type": "text",
+            "text": "当前会话：\n\n\n可选原文档（文档 ID\t文件名）：\ndoc-pdf\t课程说明.pdf",
+        },
+        {
+            "type": "image_url",
+            "image_url": {
+                "url": "data:image/png;base64,TE9ORy1TQ1JFRU5TSE9U",
+                "detail": "high",
+            },
+        },
+    ]
+    content = responses.options["input"][0]["content"]
+    assert len(content) == 2
+    assert content[0]["type"] == "input_text"
+    assert "当前会话" in content[0]["text"]
+    assert content[1] == {
+        "type": "input_image",
+        "image_url": "data:image/png;base64,TE9ORy1TQ1JFRU5TSE9U",
+        "detail": "high",
+    }
 
 
 def test_doubao_gives_direct_advice_when_document_route_is_empty() -> None:
