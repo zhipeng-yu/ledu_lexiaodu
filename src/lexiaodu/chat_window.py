@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from PySide6.QtCore import QSignalBlocker, Qt, Signal, Slot
-from PySide6.QtGui import QCloseEvent, QInputMethodEvent, QKeyEvent
+from PySide6.QtGui import (
+    QCloseEvent,
+    QImage,
+    QImageReader,
+    QInputMethodEvent,
+    QKeyEvent,
+    QPixmap,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -28,6 +37,14 @@ class ChatConversationView:
 
 
 @dataclass(frozen=True, slots=True)
+class ScreenshotDraft:
+    data: bytes
+    mime_type: str
+    width: int
+    height: int
+
+
+@dataclass(frozen=True, slots=True)
 class ChatTurnView:
     id: str
     role: str
@@ -35,6 +52,7 @@ class ChatTurnView:
     request_id: str | None = None
     status: str = "complete"
     kind: str = "message"
+    image: QImage | None = None
 
 
 class _Composer(QPlainTextEdit):
@@ -118,6 +136,19 @@ class _TimelineTurn(QFrame):
         role.setObjectName("turnRole")
         layout.addWidget(role)
 
+        if turn.image is not None and not turn.image.isNull():
+            image = QLabel()
+            image.setObjectName("turnImage")
+            image.setPixmap(
+                QPixmap.fromImage(turn.image).scaled(
+                    320,
+                    240,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+            layout.addWidget(image)
+
         body = QLabel(turn.text)
         body.setObjectName("turnBody")
         body.setTextFormat(Qt.TextFormat.PlainText)
@@ -158,12 +189,14 @@ class ChatMainWindow(QMainWindow):
     delete_conversation_requested = Signal(str)
     search_requested = Signal(str)
     send_requested = Signal(str)
+    send_image_requested = Signal(str, object)
     retry_requested = Signal(str)
     close_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
         self._active_conversation_id: str | None = None
+        self._screenshot_draft: ScreenshotDraft | None = None
         self.setObjectName("chatMainWindow")
         self.setWindowTitle("乐小读 · 家长沟通顾问")
         self.resize(1180, 760)
@@ -399,6 +432,21 @@ class ChatMainWindow(QMainWindow):
         composer_layout.setContentsMargins(18, 13, 18, 16)
         composer_layout.setSpacing(9)
 
+        self._screenshot_draft_row = QWidget()
+        draft_layout = QHBoxLayout(self._screenshot_draft_row)
+        draft_layout.setContentsMargins(0, 0, 0, 0)
+        self._screenshot_preview = QLabel()
+        self._screenshot_preview.setObjectName("screenshotDraft")
+        self._screenshot_preview.hide()
+        draft_layout.addWidget(self._screenshot_preview)
+        remove = QPushButton("移除截图")
+        remove.setObjectName("removeScreenshot")
+        remove.clicked.connect(self._clear_screenshot_draft)
+        draft_layout.addWidget(remove)
+        draft_layout.addStretch()
+        self._screenshot_draft_row.hide()
+        composer_layout.addWidget(self._screenshot_draft_row)
+
         self._composer = _Composer()
         self._composer.setObjectName("chatComposer")
         self._composer.setPlaceholderText("输入家长问题或补充情况…")
@@ -409,6 +457,10 @@ class ChatMainWindow(QMainWindow):
 
         actions = QHBoxLayout()
         actions.setSpacing(7)
+        select = QPushButton("选择截图")
+        select.setObjectName("selectScreenshot")
+        select.clicked.connect(self._choose_screenshot)
+        actions.addWidget(select)
         actions.addStretch()
         hint = QLabel("Enter 发送 · Shift+Enter 换行")
         hint.setObjectName("composerHint")
@@ -477,11 +529,65 @@ class ChatMainWindow(QMainWindow):
     @Slot()
     def submit_composer(self) -> bool:
         text = self._composer.toPlainText().strip()
-        if self._active_conversation_id is None or not text:
+        if self._active_conversation_id is None or (
+            not text and self._screenshot_draft is None
+        ):
             return False
+        if self._screenshot_draft is None:
+            self.send_requested.emit(text)
+        else:
+            self.send_image_requested.emit(text, self._screenshot_draft)
         self._composer.clear()
-        self.send_requested.emit(text)
+        self._clear_screenshot_draft()
         return True
+
+    def _choose_screenshot(self) -> None:
+        path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "选择截图",
+            "",
+            "图片 (*.png *.jpg *.jpeg *.webp)",
+        )
+        suffix = Path(path).suffix.lower()
+        if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
+            return
+        try:
+            data = Path(path).read_bytes()
+        except OSError:
+            return
+        image_format = bytes(QImageReader.imageFormat(path)).lower()
+        if not data or image_format not in {b"png", b"jpeg", b"webp"}:
+            return
+        image = QImage.fromData(data)
+        if image.isNull():
+            return
+        mime_type = {
+            b"png": "image/png",
+            b"jpeg": "image/jpeg",
+            b"webp": "image/webp",
+        }[image_format]
+        self._screenshot_draft = ScreenshotDraft(
+            data,
+            mime_type,
+            image.width(),
+            image.height(),
+        )
+        self._screenshot_preview.setPixmap(
+            QPixmap.fromImage(image).scaled(
+                112,
+                72,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+        self._screenshot_preview.show()
+        self._screenshot_draft_row.show()
+
+    def _clear_screenshot_draft(self) -> None:
+        self._screenshot_draft = None
+        self._screenshot_preview.clear()
+        self._screenshot_preview.hide()
+        self._screenshot_draft_row.hide()
 
     def _append_timeline_widget(self, widget: QWidget) -> None:
         item = QListWidgetItem()
