@@ -113,15 +113,14 @@ class ChatController(QObject):
         if answer != QMessageBox.StandardButton.Yes:
             return
         try:
-            self._screenshot_store.remove_for_conversation(conversation_id)
-        except (OSError, ScreenshotCorrupt):
+            self._screenshot_store.delete_conversation(conversation_id)
+        except (OSError, ScreenshotCorrupt, sqlite3.Error):
             QMessageBox.warning(
                 self._window,
                 "删除失败",
-                "截图文件未能删除，会话已保留",
+                "会话未能安全删除，已保留",
             )
             return
-        self._repository.delete_conversation(conversation_id)
         self._refresh_conversations()
 
     @Slot(str)
@@ -209,11 +208,13 @@ class ChatController(QObject):
                 draft.width,
                 draft.height,
             )
-        except (OSError, ValueError, sqlite3.Error):
+        except Exception as exc:
             self._repository.delete_pending_user_request(
                 conversation_id,
                 request_id,
             )
+            if not isinstance(exc, (OSError, ValueError, sqlite3.Error)):
+                raise
             QMessageBox.warning(
                 self._window,
                 "截图发送失败",

@@ -493,6 +493,7 @@ class ChatMainWindow(QMainWindow):
             self._conversations.setCurrentItem(active_item)
         else:
             self._active_conversation_id = None
+            self._clear_screenshot_draft()
             self._timeline.clear()
         del blocker
 
@@ -509,6 +510,8 @@ class ChatMainWindow(QMainWindow):
         conversation_id: str,
         turns: tuple[ChatTurnView, ...],
     ) -> None:
+        if conversation_id != self._active_conversation_id:
+            self._clear_screenshot_draft()
         self._active_conversation_id = conversation_id
         self._timeline.clear()
         for turn in turns:
@@ -602,9 +605,13 @@ class ChatMainWindow(QMainWindow):
         _previous: QListWidgetItem | None,
     ) -> None:
         if current is None:
+            self._active_conversation_id = None
+            self._clear_screenshot_draft()
             return
         conversation_id = current.data(Qt.ItemDataRole.UserRole)
         if isinstance(conversation_id, str) and conversation_id:
+            if conversation_id != self._active_conversation_id:
+                self._clear_screenshot_draft()
             self._active_conversation_id = conversation_id
             self.conversation_selected.emit(conversation_id)
 

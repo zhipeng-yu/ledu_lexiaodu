@@ -120,6 +120,50 @@ def test_screenshot_draft_can_be_replaced_or_removed(tmp_path, monkeypatch) -> N
     window.close()
 
 
+def test_screenshot_draft_is_discarded_when_conversation_changes_or_is_unset(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _application()
+    path = tmp_path / "private.png"
+    image = QImage(2, 2, QImage.Format.Format_RGB32)
+    image.fill(Qt.GlobalColor.white)
+    assert image.save(str(path), "PNG")
+    monkeypatch.setattr(
+        QFileDialog,
+        "getOpenFileName",
+        lambda *_args, **_kwargs: (str(path), "PNG (*.png)"),
+    )
+    first = ChatConversationView("a", "A")
+    second = ChatConversationView("b", "B")
+    window = ChatMainWindow()
+    window.set_conversations((first, second))
+    assert window.select_conversation(first.id)
+    window.findChild(QPushButton, "selectScreenshot").click()
+    sent_text: list[str] = []
+    sent_images: list[tuple[str, object]] = []
+    window.send_requested.connect(sent_text.append)
+    window.send_image_requested.connect(
+        lambda text, draft: sent_images.append((text, draft))
+    )
+
+    assert window.select_conversation(second.id)
+    window.findChild(QPlainTextEdit, "chatComposer").setPlainText("B message")
+    assert window.submit_composer()
+
+    assert sent_text == ["B message"]
+    assert sent_images == []
+    assert window._screenshot_draft is None
+
+    window.findChild(QPushButton, "selectScreenshot").click()
+    assert window._screenshot_draft is not None
+    window.set_conversations((first,))
+
+    assert window.active_conversation_id is None
+    assert window._screenshot_draft is None
+    window.close()
+
+
 def test_invalid_screenshot_file_is_rejected_without_emitting(tmp_path, monkeypatch) -> None:
     _application()
     path = tmp_path / "not-an-image.png"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -535,6 +536,7 @@ def test_image_save_programmer_error_is_not_swallowed(
             ScreenshotDraft(b"data", "image/png", 1, 1),
         )
 
+    assert repository.list_messages(conversation.id) == ()
     controller.shutdown()
 
 
@@ -604,6 +606,60 @@ def test_delete_conversation_removes_only_its_screenshot(
     controller.shutdown()
 
 
+def test_delete_repository_failure_restores_ciphertext_and_keeps_conversation_visible(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    application()
+    repository = repository_at(tmp_path / "chat.sqlite3")
+    store = screenshot_store(repository)
+    conversation = repository.create_conversation("keep everything")
+    message = repository.append_user_message(
+        conversation.id, "private", request_id="request", kind="image"
+    )
+    attachment = store.save(
+        conversation.id, message.id, b"private-image", "image/png", 1, 1
+    )
+    expected_conversation = repository.get_conversation(conversation.id)
+    expected_messages = repository.list_messages(conversation.id)
+    expected_attachments = repository.list_screenshots(conversation.id)
+    expected_ciphertext = attachment.encrypted_path.read_bytes()
+    window = FakeWindow()
+    controller = ChatController(
+        window,
+        repository,
+        context_builder(repository, store),
+        store,
+        RecordingAssistant(repository, []),
+        ManualExecutor(),
+    )
+    warnings: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "lexiaodu.chat_controller.QMessageBox.question",
+        lambda *_args: QMessageBox.StandardButton.Yes,
+    )
+    monkeypatch.setattr(
+        repository,
+        "delete_conversation",
+        lambda _id: (_ for _ in ()).throw(sqlite3.OperationalError("locked")),
+    )
+    monkeypatch.setattr(
+        "lexiaodu.chat_controller.QMessageBox.warning",
+        lambda _window, title, body: warnings.append((title, body)),
+    )
+
+    window.select(conversation.id)
+    controller.delete_conversation(conversation.id)
+
+    assert repository.get_conversation(conversation.id) == expected_conversation
+    assert repository.list_messages(conversation.id) == expected_messages
+    assert repository.list_screenshots(conversation.id) == expected_attachments
+    assert attachment.encrypted_path.read_bytes() == expected_ciphertext
+    assert window.active_conversation_id == conversation.id
+    assert warnings == [("删除失败", "会话未能安全删除，已保留")]
+    controller.shutdown()
+
+
 @pytest.mark.parametrize("failure", [OSError(), ScreenshotCorrupt("bad")])
 def test_delete_image_failure_keeps_conversation_visible(
     tmp_path: Path,
@@ -628,7 +684,7 @@ def test_delete_image_failure_keeps_conversation_visible(
         "lexiaodu.chat_controller.QMessageBox.question",
         lambda *_args: QMessageBox.StandardButton.Yes,
     )
-    monkeypatch.setattr(store, "remove_for_conversation", lambda _id: (_ for _ in ()).throw(failure))
+    monkeypatch.setattr(store, "delete_conversation", lambda _id: (_ for _ in ()).throw(failure))
     monkeypatch.setattr(
         "lexiaodu.chat_controller.QMessageBox.warning",
         lambda _window, title, body: warnings.append((title, body)),
@@ -639,7 +695,7 @@ def test_delete_image_failure_keeps_conversation_visible(
 
     assert repository.get_conversation(conversation.id).id == conversation.id
     assert window.active_conversation_id == conversation.id
-    assert warnings == [("删除失败", "截图文件未能删除，会话已保留")]
+    assert warnings == [("删除失败", "会话未能安全删除，已保留")]
     controller.shutdown()
 
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from lexiaodu.chat_repository import ConversationRepository, Message
-from lexiaodu.screenshot_store import ScreenshotStore
+from lexiaodu.screenshot_store import ScreenshotCorrupt, ScreenshotStore
 
 
 _ROLE_LABELS = {"user": "顾问", "assistant": "乐小读"}
@@ -50,6 +50,15 @@ class ContextBuilder:
     ) -> ContextPackage:
         conversation = self._repository.get_conversation(conversation_id)
         messages = self._repository.list_messages(conversation_id)
+        request_message: Message | None = None
+        if request_message_id is not None:
+            for index, message in enumerate(messages):
+                if message.id == request_message_id:
+                    request_message = message
+                    messages = messages[: index + 1]
+                    break
+            else:
+                raise KeyError(request_message_id)
         selected: list[Message] = []
         used = 0
         for message in reversed(messages):
@@ -67,6 +76,12 @@ class ContextBuilder:
             if request_message_id is not None
             else None
         )
+        if (
+            request_message is not None
+            and request_message.kind == "image"
+            and payload is None
+        ):
+            raise ScreenshotCorrupt("当前请求的截图文件缺失")
         if payload is None:
             for message in reversed(selected):
                 payload = self._screenshot_store.load_for_message(

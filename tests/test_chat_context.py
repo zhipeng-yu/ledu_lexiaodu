@@ -5,7 +5,7 @@ import pytest
 from lexiaodu.chat_context import ContextBuilder
 from lexiaodu.chat_repository import ConversationRepository
 from lexiaodu.local_crypto import DataCipher
-from lexiaodu.screenshot_store import ScreenshotStore
+from lexiaodu.screenshot_store import ScreenshotCorrupt, ScreenshotStore
 
 
 @pytest.fixture
@@ -128,3 +128,53 @@ def test_builder_does_not_select_another_conversations_or_dropped_image(tmp_path
 
     assert package.image is None
     assert "外部截图" not in package.render_for_model()
+
+
+def test_retry_uses_the_latest_image_that_existed_when_the_request_was_created(
+    tmp_path,
+) -> None:
+    cipher = DataCipher(b"r" * 32)
+    repository = ConversationRepository(tmp_path / "chat.sqlite3", cipher)
+    store = ScreenshotStore(tmp_path / "chat-images", repository, cipher)
+    conversation = repository.create_conversation("retry")
+    first = repository.append_user_message(
+        conversation.id, "first image", request_id="first", kind="image"
+    )
+    store.save(conversation.id, first.id, b"FIRST", "image/png", 1, 1)
+    failed = repository.append_user_message(
+        conversation.id, "analyze first", request_id="failed"
+    )
+    repository.mark_request_failed(conversation.id, "failed")
+    second = repository.append_user_message(
+        conversation.id, "second image", request_id="second", kind="image"
+    )
+    store.save(conversation.id, second.id, b"SECOND", "image/png", 1, 1)
+
+    package = ContextBuilder(
+        repository, store, character_budget=1000
+    ).build(conversation.id, request_message_id=failed.id)
+
+    assert package.image is not None
+    assert package.image.data == b"FIRST"
+    assert "second image" not in package.render_for_model()
+
+
+def test_image_request_with_missing_own_attachment_never_substitutes_another_image(
+    tmp_path,
+) -> None:
+    cipher = DataCipher(b"q" * 32)
+    repository = ConversationRepository(tmp_path / "chat.sqlite3", cipher)
+    store = ScreenshotStore(tmp_path / "chat-images", repository, cipher)
+    conversation = repository.create_conversation("missing")
+    previous = repository.append_user_message(
+        conversation.id, "previous", request_id="previous", kind="image"
+    )
+    store.save(conversation.id, previous.id, b"PREVIOUS", "image/png", 1, 1)
+    missing = repository.append_user_message(
+        conversation.id, "missing", request_id="missing", kind="image"
+    )
+
+    with pytest.raises(ScreenshotCorrupt, match="当前请求的截图文件缺失"):
+        ContextBuilder(repository, store, character_budget=1000).build(
+            conversation.id, request_message_id=missing.id
+        )

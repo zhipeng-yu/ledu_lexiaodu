@@ -35,8 +35,7 @@ def test_screenshot_is_encrypted_scoped_restart_safe_and_deleted(tmp_path: Path)
     reopened_store = ScreenshotStore(tmp_path / "chat-images", reopened, cipher)
     assert reopened_store.load_for_message(first.id, message.id).height == 12000
 
-    reopened_store.remove_for_conversation(first.id)
-    reopened.delete_conversation(first.id)
+    reopened_store.delete_conversation(first.id)
     assert not attachment.encrypted_path.exists()
 
 
@@ -120,3 +119,44 @@ def test_delete_failure_restores_previously_removed_ciphertext(
         second.id,
     ]
     assert repository.get_conversation(conversation.id).id == conversation.id
+
+
+def test_delete_conversation_accepts_an_already_missing_ciphertext(
+    tmp_path: Path,
+) -> None:
+    cipher = DataCipher(b"m" * 32)
+    repository = ConversationRepository(tmp_path / "chat.sqlite3", cipher)
+    conversation = repository.create_conversation("already missing")
+    message = repository.append_user_message(
+        conversation.id, "image", request_id="request", kind="image"
+    )
+    store = ScreenshotStore(tmp_path / "chat-images", repository, cipher)
+    attachment = store.save(
+        conversation.id, message.id, b"image", "image/png", 1, 1
+    )
+    attachment.encrypted_path.unlink()
+
+    store.delete_conversation(conversation.id)
+
+    assert repository.list_conversations() == ()
+
+
+def test_delete_conversation_rejects_corrupt_ciphertext(tmp_path: Path) -> None:
+    cipher = DataCipher(b"c" * 32)
+    repository = ConversationRepository(tmp_path / "chat.sqlite3", cipher)
+    conversation = repository.create_conversation("corrupt")
+    message = repository.append_user_message(
+        conversation.id, "image", request_id="request", kind="image"
+    )
+    store = ScreenshotStore(tmp_path / "chat-images", repository, cipher)
+    attachment = store.save(
+        conversation.id, message.id, b"image", "image/png", 1, 1
+    )
+    expected_conversation = repository.get_conversation(conversation.id)
+    attachment.encrypted_path.write_bytes(b"corrupt")
+
+    with pytest.raises(ScreenshotCorrupt, match="截图无法解密"):
+        store.delete_conversation(conversation.id)
+
+    assert repository.get_conversation(conversation.id) == expected_conversation
+    assert attachment.encrypted_path.read_bytes() == b"corrupt"

@@ -88,35 +88,63 @@ class ScreenshotStore:
         if attachment is None:
             return None
         payload = attachment.encrypted_path.read_bytes()
-        if len(payload) < 14 or payload[:1] != _VERSION:
-            raise ScreenshotCorrupt("截图无法解密")
-        try:
-            data = AESGCM(self._cipher.decrypt(attachment.encrypted_data_key)).decrypt(
-                payload[1:13], payload[13:], _VERSION
-            )
-        except (InvalidTag, ValueError) as exc:
-            raise ScreenshotCorrupt("截图无法解密") from exc
+        data = self._decrypt(attachment, payload)
         return ScreenshotPayload(
             data, attachment.mime_type, attachment.width, attachment.height
         )
 
+    def _decrypt(
+        self, attachment: ScreenshotAttachment, payload: bytes
+    ) -> bytes:
+        if len(payload) < 14 or payload[:1] != _VERSION:
+            raise ScreenshotCorrupt("截图无法解密")
+        try:
+            return AESGCM(self._cipher.decrypt(attachment.encrypted_data_key)).decrypt(
+                payload[1:13], payload[13:], _VERSION
+            )
+        except (InvalidTag, ValueError) as exc:
+            raise ScreenshotCorrupt("截图无法解密") from exc
+
+    def delete_conversation(self, conversation_id: str) -> None:
+        files = self._conversation_files(conversation_id)
+        try:
+            self._remove_files(files)
+            self._repository.delete_conversation(conversation_id)
+        except BaseException:
+            self._restore_files(files)
+            raise
+
     def remove_for_conversation(self, conversation_id: str) -> None:
+        files = self._conversation_files(conversation_id)
+        try:
+            self._remove_files(files)
+        except BaseException:
+            self._restore_files(files)
+            raise
+
+    def _conversation_files(self, conversation_id: str) -> list[tuple[Path, bytes]]:
         root = self._root.resolve()
         files: list[tuple[Path, bytes]] = []
         for attachment in self._repository.list_screenshots(conversation_id):
             path = attachment.encrypted_path.resolve()
             if path.parent != root:
                 raise ScreenshotCorrupt("截图路径无效")
-            files.append((path, path.read_bytes()))
-        removed: list[tuple[Path, bytes]] = []
-        try:
-            for path, ciphertext in files:
-                path.unlink()
-                removed.append((path, ciphertext))
-        except OSError:
-            for path, ciphertext in removed:
-                self._atomic_write(path, ciphertext)
-            raise
+            try:
+                ciphertext = path.read_bytes()
+            except FileNotFoundError:
+                continue
+            self._decrypt(attachment, ciphertext)
+            files.append((path, ciphertext))
+        return files
+
+    @staticmethod
+    def _remove_files(files: list[tuple[Path, bytes]]) -> None:
+        for path, _ciphertext in files:
+            path.unlink(missing_ok=True)
+
+    def _restore_files(self, files: list[tuple[Path, bytes]]) -> None:
+        for path, ciphertext in files:
+            self._atomic_write(path, ciphertext)
 
     def _atomic_write(self, path: Path, payload: bytes) -> None:
         temporary: Path | None = None

@@ -227,6 +227,12 @@ def test_doubao_chat_prompt_asks_consultant_only_for_critical_missing_details() 
     assert "不要假装直接询问家长" in system
 
 
+def test_screenshot_prompt_forbids_inventing_illegible_content() -> None:
+    system = _chat_system_prompt()
+
+    assert "截图文字看不清时，不得还原或编造内容，只追问一个必要问题" in system
+
+
 def test_doubao_chat_prompt_requires_advice_then_copy_ready_parent_text() -> None:
     system = _chat_system_prompt()
 
