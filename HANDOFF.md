@@ -30,7 +30,4 @@
 - 单图截图的选择、加密保存、重启恢复、删除、上下文传递和时间线缩略图已完成；长图使用 `high` 细节，不做本地切片。
 - 自动化验证实际运行：`$env:PYTHONPATH=(Resolve-Path -LiteralPath 'src').Path; & 'E:\Project\ledu_project\lexiaodu\.venv\python.exe' -B -m pytest tests/test_screenshot_store.py tests/test_chat_repository.py tests/test_chat_context.py tests/test_advisor_assistant.py tests/test_chat_shell.py tests/test_chat_controller.py tests/test_app.py -q`。
 - 自动化验证实际运行：`$env:PYTHONPATH=(Resolve-Path -LiteralPath 'src').Path; & 'E:\Project\ledu_project\lexiaodu\.venv\python.exe' -B -m pytest -q`；在 `LEXIAODU_GENERATOR=simulated` 和 `QT_QPA_PLATFORM=offscreen` 下启动 `python -m lexiaodu` 的进程保持运行。
-
-## 仍未解决
-
-- 未配置可用的 `ARK_API_KEY` 和 `ARK_MODEL`，因此尚未进行真实方舟 UI 验收：个人长截图、至少三人群聊长截图，以及身份不明群聊截图。前两项需确认 `high` 细节可读；最后一项需确认只出现一个身份问题且无家长话术。
+- 真实方舟验收实际运行：仅使用内存生成的纯虚构中文长截图；个人和三人群聊均可读并生成回复建议，身份不明群聊只追问一个身份问题且不生成家长话术；测试图片未落盘。
