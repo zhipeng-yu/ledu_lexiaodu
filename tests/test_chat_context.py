@@ -13,6 +13,11 @@ def repository(tmp_path) -> ConversationRepository:
     return ConversationRepository(tmp_path / "context.sqlite3", DataCipher(b"x" * 32))
 
 
+def test_builder_requires_screenshot_store(repository) -> None:
+    with pytest.raises(TypeError, match="screenshot_store"):
+        ContextBuilder(repository, character_budget=200)
+
+
 def test_builder_labels_roles_and_never_crosses_conversations(repository, tmp_path) -> None:
     first = repository.create_conversation("first")
     second = repository.create_conversation("second")

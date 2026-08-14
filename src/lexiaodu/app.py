@@ -22,6 +22,7 @@ from lexiaodu.config import AppSettings, SettingsError, load_settings
 from lexiaodu.font_scaling import ApplicationFontScaler
 from lexiaodu.local_crypto import DataCipher
 from lexiaodu.office_documents import ArkKnowledgeDocumentReader
+from lexiaodu.screenshot_store import ScreenshotStore
 
 
 @dataclass(slots=True)
@@ -154,8 +155,12 @@ def build_chat_runtime(
 ) -> ChatRuntime:
     cipher = DataCipher.open(settings.chat.database_path.with_suffix(".key"))
     repository = ConversationRepository(settings.chat.database_path, cipher)
+    screenshot_store = ScreenshotStore(
+        settings.chat.database_path.with_name("chat-images"), repository, cipher
+    )
     context_builder = ContextBuilder(
         repository,
+        screenshot_store,
         character_budget=settings.chat.context_character_budget,
     )
     window = ChatMainWindow()

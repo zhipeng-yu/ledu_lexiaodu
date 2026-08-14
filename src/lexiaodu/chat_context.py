@@ -32,7 +32,7 @@ class ContextBuilder:
     def __init__(
         self,
         repository: ConversationRepository,
-        screenshot_store: ScreenshotStore | None = None,
+        screenshot_store: ScreenshotStore,
         *,
         character_budget: int,
     ) -> None:
@@ -64,10 +64,10 @@ class ContextBuilder:
             self._screenshot_store.load_for_message(
                 conversation_id, request_message_id
             )
-            if self._screenshot_store is not None and request_message_id is not None
+            if request_message_id is not None
             else None
         )
-        if payload is None and self._screenshot_store is not None:
+        if payload is None:
             for message in reversed(selected):
                 payload = self._screenshot_store.load_for_message(
                     conversation_id, message.id

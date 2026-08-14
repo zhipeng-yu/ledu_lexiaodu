@@ -18,6 +18,7 @@ from lexiaodu.chat_controller import ChatController
 from lexiaodu.chat_repository import ConversationRepository
 from lexiaodu.chat_window import ChatConversationView, ChatTurnView
 from lexiaodu.local_crypto import DataCipher
+from lexiaodu.screenshot_store import ScreenshotStore
 
 
 class FakeWindow(QObject):
@@ -153,6 +154,11 @@ def repository_at(path: Path) -> ConversationRepository:
 def context_builder(repository: Any) -> ContextBuilder:
     return ContextBuilder(
         repository,
+        ScreenshotStore(
+            repository._database_path.with_name("chat-images"),
+            repository,
+            DataCipher(b"c" * 32),
+        ),
         character_budget=10_000,
     )
 

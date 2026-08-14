@@ -5,7 +5,7 @@ import json
 import re
 from typing import Any, Protocol
 
-from .chat_context import ContextPackage
+from .chat_context import ContextImage, ContextPackage
 from .office_documents import KnowledgeDocument, KnowledgeDocumentError
 
 
@@ -226,13 +226,10 @@ class OpenAIConversationAssistant:
             ],
         }
         if context.image is not None:
-            data = base64.b64encode(context.image.data).decode("ascii")
             request["input"][0]["content"].append(
                 {
                     "type": "input_image",
-                    "image_url": (
-                        f"data:{context.image.mime_type};base64,{data}"
-                    ),
+                    "image_url": _image_data_url(context.image),
                     "detail": "high",
                 }
             )
@@ -250,17 +247,21 @@ def _chat_user_content(
 ) -> str | list[dict[str, Any]]:
     if context.image is None:
         return text
-    data = base64.b64encode(context.image.data).decode("ascii")
     return [
         {"type": "text", "text": text},
         {
             "type": "image_url",
             "image_url": {
-                "url": f"data:{context.image.mime_type};base64,{data}",
+                "url": _image_data_url(context.image),
                 "detail": "high",
             },
         },
     ]
+
+
+def _image_data_url(image: ContextImage) -> str:
+    data = base64.b64encode(image.data).decode("ascii")
+    return f"data:{image.mime_type};base64,{data}"
 
 
 def _render_advisor_response(content: str) -> str:
