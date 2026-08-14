@@ -122,8 +122,8 @@ def test_screenshot_draft_can_be_replaced_or_removed(tmp_path, monkeypatch) -> N
 
 def test_invalid_screenshot_file_is_rejected_without_emitting(tmp_path, monkeypatch) -> None:
     _application()
-    path = tmp_path / "not-an-image.txt"
-    path.write_text("not an image", encoding="utf-8")
+    path = tmp_path / "not-an-image.png"
+    path.write_bytes(b"not an image")
     monkeypatch.setattr(
         QFileDialog,
         "getOpenFileName",
