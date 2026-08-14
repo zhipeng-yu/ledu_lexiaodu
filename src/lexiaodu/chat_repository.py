@@ -41,6 +41,19 @@ class Message:
 
 
 @dataclass(frozen=True, slots=True)
+class ScreenshotAttachment:
+    id: str
+    conversation_id: str
+    message_id: str
+    encrypted_path: Path
+    encrypted_data_key: bytes
+    mime_type: str
+    width: int
+    height: int
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class PendingRequest:
     conversation_id: str
     request_id: str
@@ -100,6 +113,17 @@ class ConversationRepository:
                     created_at TEXT NOT NULL,
                     append_order INTEGER,
                     content_revision INTEGER NOT NULL DEFAULT 1
+                );
+                CREATE TABLE IF NOT EXISTS screenshot_attachments (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL REFERENCES conversations(id),
+                    message_id TEXT NOT NULL UNIQUE REFERENCES messages(id) ON DELETE CASCADE,
+                    encrypted_path TEXT NOT NULL UNIQUE,
+                    encrypted_data_key BLOB NOT NULL,
+                    mime_type TEXT NOT NULL,
+                    width INTEGER NOT NULL,
+                    height INTEGER NOT NULL,
+                    created_at TEXT NOT NULL
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS messages_request_owner
                     ON messages(conversation_id, request_id)
@@ -399,6 +423,106 @@ class ConversationRepository:
             ).fetchall()
         return tuple(self._pending(row) for row in rows)
 
+    def save_screenshot_attachment(
+        self,
+        conversation_id: str,
+        message_id: str,
+        attachment_id: str,
+        encrypted_path: Path,
+        encrypted_data_key: bytes,
+        mime_type: str,
+        width: int,
+        height: int,
+    ) -> ScreenshotAttachment:
+        now = self._clock()
+        attachment = ScreenshotAttachment(
+            attachment_id,
+            conversation_id,
+            message_id,
+            encrypted_path,
+            encrypted_data_key,
+            mime_type,
+            width,
+            height,
+            now,
+        )
+        with self._connect() as connection:
+            self._require_conversation(connection, conversation_id)
+            owner = connection.execute(
+                "SELECT role FROM messages WHERE id = ? AND conversation_id = ?",
+                (message_id, conversation_id),
+            ).fetchone()
+            if owner is None or owner["role"] != "user":
+                raise KeyError(message_id)
+            connection.execute(
+                """
+                INSERT INTO screenshot_attachments(
+                    id, conversation_id, message_id, encrypted_path,
+                    encrypted_data_key, mime_type, width, height, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    attachment.id,
+                    attachment.conversation_id,
+                    attachment.message_id,
+                    str(attachment.encrypted_path),
+                    attachment.encrypted_data_key,
+                    attachment.mime_type,
+                    attachment.width,
+                    attachment.height,
+                    attachment.created_at.isoformat(),
+                ),
+            )
+        return attachment
+
+    def get_screenshot_for_message(
+        self, conversation_id: str, message_id: str
+    ) -> ScreenshotAttachment | None:
+        with self._connect() as connection:
+            self._require_conversation(connection, conversation_id)
+            row = connection.execute(
+                """
+                SELECT * FROM screenshot_attachments
+                WHERE conversation_id = ? AND message_id = ?
+                """,
+                (conversation_id, message_id),
+            ).fetchone()
+        return self._screenshot(row) if row is not None else None
+
+    def list_screenshots(
+        self, conversation_id: str
+    ) -> tuple[ScreenshotAttachment, ...]:
+        with self._connect() as connection:
+            self._require_conversation(connection, conversation_id)
+            rows = connection.execute(
+                """
+                SELECT * FROM screenshot_attachments
+                WHERE conversation_id = ? ORDER BY created_at, id
+                """,
+                (conversation_id,),
+            ).fetchall()
+        return tuple(self._screenshot(row) for row in rows)
+
+    def delete_pending_user_request(
+        self, conversation_id: str, request_id: str
+    ) -> None:
+        with self._connect() as connection:
+            self._require_conversation(connection, conversation_id)
+            row = self._request_row(connection, conversation_id, request_id)
+            reply = connection.execute(
+                """
+                SELECT 1 FROM messages
+                WHERE conversation_id = ? AND in_reply_to_request_id = ?
+                """,
+                (conversation_id, request_id),
+            ).fetchone()
+            if (
+                row["processing_status"] not in {"pending", "failed"}
+                or reply is not None
+            ):
+                raise ValueError("已完成请求不能回滚")
+            connection.execute("DELETE FROM messages WHERE id = ?", (row["id"],))
+
     def _set_request_status(
         self,
         conversation_id: str,
@@ -531,6 +655,19 @@ class ConversationRepository:
             created_at=datetime.fromisoformat(row["created_at"]),
             model_metadata=self._decrypt(metadata) if metadata is not None else None,
             content_revision=int(row["content_revision"]),
+        )
+
+    def _screenshot(self, row: sqlite3.Row) -> ScreenshotAttachment:
+        return ScreenshotAttachment(
+            id=row["id"],
+            conversation_id=row["conversation_id"],
+            message_id=row["message_id"],
+            encrypted_path=Path(row["encrypted_path"]),
+            encrypted_data_key=bytes(row["encrypted_data_key"]),
+            mime_type=row["mime_type"],
+            width=int(row["width"]),
+            height=int(row["height"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
         )
 
     def _pending(self, row: sqlite3.Row) -> PendingRequest:

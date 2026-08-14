@@ -140,6 +140,35 @@ def test_reopen_removes_legacy_screenshot_content_and_tables(
         "reply_cards",
         "cleanup_jobs",
     }
+    assert "screenshot_attachments" in tables
+
+
+def test_delete_pending_user_request_removes_only_unreplied_pending_or_failed_request(
+    database_path,
+    cipher,
+) -> None:
+    repository = ConversationRepository(database_path, cipher)
+    conversation = repository.create_conversation("rollback")
+    pending = repository.append_user_message(
+        conversation.id, "pending", request_id="pending"
+    )
+    repository.append_user_message(conversation.id, "failed", request_id="failed")
+    repository.mark_request_failed(conversation.id, "failed")
+    repository.append_user_message(
+        conversation.id, "completed", request_id="completed"
+    )
+    repository.append_assistant_message(
+        conversation.id, "reply", in_reply_to_request_id="completed"
+    )
+
+    repository.delete_pending_user_request(conversation.id, pending.request_id or "")
+    repository.delete_pending_user_request(conversation.id, "failed")
+
+    assert tuple(
+        message.request_id for message in repository.list_messages(conversation.id)
+    ) == ("completed", None)
+    with pytest.raises(ValueError):
+        repository.delete_pending_user_request(conversation.id, "completed")
 
 
 def test_delete_physically_removes_conversation_and_messages(database_path, cipher) -> None:

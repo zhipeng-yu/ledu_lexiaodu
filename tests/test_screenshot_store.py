@@ -1,0 +1,78 @@
+from pathlib import Path
+
+import pytest
+
+from lexiaodu.chat_repository import ConversationRepository
+from lexiaodu.local_crypto import DataCipher
+from lexiaodu.screenshot_store import ScreenshotCorrupt, ScreenshotStore
+
+
+PNG_SENTINEL = b"\x89PNG\r\n\x1a\nPRIVATE-CHAT-SENTINEL"
+
+
+def test_screenshot_is_encrypted_scoped_restart_safe_and_deleted(tmp_path: Path) -> None:
+    cipher = DataCipher(b"s" * 32)
+    database = tmp_path / "chat.sqlite3"
+    repository = ConversationRepository(database, cipher)
+    first = repository.create_conversation("first")
+    second = repository.create_conversation("second")
+    message = repository.append_user_message(
+        first.id, "聊天截图", request_id="request-1", kind="image"
+    )
+    store = ScreenshotStore(tmp_path / "chat-images", repository, cipher)
+
+    attachment = store.save(
+        first.id, message.id, PNG_SENTINEL, "image/png", 1080, 12000
+    )
+
+    assert attachment.encrypted_path.suffix == ".bin"
+    assert PNG_SENTINEL not in attachment.encrypted_path.read_bytes()
+    assert cipher.decrypt(attachment.encrypted_data_key) not in database.read_bytes()
+    assert store.load_for_message(first.id, message.id).data == PNG_SENTINEL
+    assert store.load_for_message(second.id, message.id) is None
+
+    reopened = ConversationRepository(database, cipher)
+    reopened_store = ScreenshotStore(tmp_path / "chat-images", reopened, cipher)
+    assert reopened_store.load_for_message(first.id, message.id).height == 12000
+
+    reopened_store.remove_for_conversation(first.id)
+    reopened.delete_conversation(first.id)
+    assert not attachment.encrypted_path.exists()
+
+
+def test_tampered_screenshot_fails_authentication(tmp_path: Path) -> None:
+    cipher = DataCipher(b"t" * 32)
+    repository = ConversationRepository(tmp_path / "chat.sqlite3", cipher)
+    conversation = repository.create_conversation("tamper")
+    message = repository.append_user_message(
+        conversation.id, "聊天截图", request_id="request", kind="image"
+    )
+    store = ScreenshotStore(tmp_path / "chat-images", repository, cipher)
+    attachment = store.save(
+        conversation.id, message.id, PNG_SENTINEL, "image/png", 10, 20
+    )
+    attachment.encrypted_path.write_bytes(
+        attachment.encrypted_path.read_bytes()[:-1] + b"x"
+    )
+
+    with pytest.raises(ScreenshotCorrupt, match="截图无法解密"):
+        store.load_for_message(conversation.id, message.id)
+
+
+def test_repository_failure_removes_new_encrypted_file(tmp_path: Path) -> None:
+    cipher = DataCipher(b"f" * 32)
+    repository = ConversationRepository(tmp_path / "chat.sqlite3", cipher)
+    conversation = repository.create_conversation("rollback")
+    store = ScreenshotStore(tmp_path / "chat-images", repository, cipher)
+
+    with pytest.raises(KeyError):
+        store.save(
+            conversation.id,
+            "missing-message",
+            PNG_SENTINEL,
+            "image/png",
+            10,
+            20,
+        )
+
+    assert tuple((tmp_path / "chat-images").iterdir()) == ()
