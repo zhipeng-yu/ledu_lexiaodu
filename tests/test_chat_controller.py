@@ -505,6 +505,39 @@ def test_image_save_failure_removes_pending_request_and_does_not_dispatch(
     assert warnings == [("截图发送失败", "截图未能安全保存")]
 
 
+def test_image_save_programmer_error_is_not_swallowed(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    application()
+    repository = repository_at(tmp_path / "chat.sqlite3")
+    store = screenshot_store(repository)
+    conversation = repository.create_conversation("image")
+    window = FakeWindow()
+    controller = ChatController(
+        window,
+        repository,
+        context_builder(repository, store),
+        store,
+        RecordingAssistant(repository, []),
+        ManualExecutor(),
+    )
+    monkeypatch.setattr(
+        store,
+        "save",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("programmer error")),
+    )
+
+    window.select(conversation.id)
+    with pytest.raises(RuntimeError, match="programmer error"):
+        controller.send_image_message(
+            "caption",
+            ScreenshotDraft(b"data", "image/png", 1, 1),
+        )
+
+    controller.shutdown()
+
+
 def test_image_context_stays_with_its_owner_conversation(
     tmp_path: Path,
 ) -> None:

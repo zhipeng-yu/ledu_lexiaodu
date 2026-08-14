@@ -102,11 +102,21 @@ class ScreenshotStore:
 
     def remove_for_conversation(self, conversation_id: str) -> None:
         root = self._root.resolve()
+        files: list[tuple[Path, bytes]] = []
         for attachment in self._repository.list_screenshots(conversation_id):
             path = attachment.encrypted_path.resolve()
             if path.parent != root:
                 raise ScreenshotCorrupt("截图路径无效")
-            path.unlink(missing_ok=True)
+            files.append((path, path.read_bytes()))
+        removed: list[tuple[Path, bytes]] = []
+        try:
+            for path, ciphertext in files:
+                path.unlink()
+                removed.append((path, ciphertext))
+        except OSError:
+            for path, ciphertext in removed:
+                self._atomic_write(path, ciphertext)
+            raise
 
     def _atomic_write(self, path: Path, payload: bytes) -> None:
         temporary: Path | None = None

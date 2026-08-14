@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from concurrent.futures import Executor, Future
 from typing import Protocol
 from uuid import uuid4
@@ -208,7 +209,7 @@ class ChatController(QObject):
                 draft.width,
                 draft.height,
             )
-        except Exception:
+        except (OSError, ValueError, sqlite3.Error):
             self._repository.delete_pending_user_request(
                 conversation_id,
                 request_id,

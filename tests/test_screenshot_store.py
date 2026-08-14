@@ -76,3 +76,47 @@ def test_repository_failure_removes_new_encrypted_file(tmp_path: Path) -> None:
         )
 
     assert tuple((tmp_path / "chat-images").iterdir()) == ()
+
+
+def test_delete_failure_restores_previously_removed_ciphertext(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cipher = DataCipher(b"r" * 32)
+    repository = ConversationRepository(tmp_path / "chat.sqlite3", cipher)
+    conversation = repository.create_conversation("rollback")
+    first_message = repository.append_user_message(
+        conversation.id, "first", request_id="first", kind="image"
+    )
+    second_message = repository.append_user_message(
+        conversation.id, "second", request_id="second", kind="image"
+    )
+    store = ScreenshotStore(tmp_path / "chat-images", repository, cipher)
+    first = store.save(
+        conversation.id, first_message.id, b"first", "image/png", 1, 1
+    )
+    second = store.save(
+        conversation.id, second_message.id, b"second", "image/png", 1, 1
+    )
+    first, second = repository.list_screenshots(conversation.id)
+    first_ciphertext = first.encrypted_path.read_bytes()
+    second_ciphertext = second.encrypted_path.read_bytes()
+    original_unlink = Path.unlink
+
+    def fail_second_unlink(path: Path, *, missing_ok: bool = False) -> None:
+        if path == second.encrypted_path:
+            raise OSError("locked")
+        original_unlink(path, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", fail_second_unlink)
+
+    with pytest.raises(OSError, match="locked"):
+        store.remove_for_conversation(conversation.id)
+
+    assert first.encrypted_path.read_bytes() == first_ciphertext
+    assert second.encrypted_path.read_bytes() == second_ciphertext
+    assert [attachment.id for attachment in repository.list_screenshots(conversation.id)] == [
+        first.id,
+        second.id,
+    ]
+    assert repository.get_conversation(conversation.id).id == conversation.id
