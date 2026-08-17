@@ -133,12 +133,18 @@ class FailingKnowledgeReader(FakeKnowledgeReader):
         )
 
 
-def _message(body: str, *, role: str = "user", id: str = "message") -> Message:
+def _message(
+    body: str,
+    *,
+    role: str = "user",
+    id: str = "message",
+    kind: str = "text",
+) -> Message:
     return Message(
         id=id,
         conversation_id="conversation",
         role=role,
-        kind="text",
+        kind=kind,
         body=body,
         request_id=id if role == "user" else None,
         in_reply_to_request_id=None,
@@ -323,6 +329,47 @@ def test_doubao_can_chat_normally_without_advisor_template() -> None:
     assert "chat" in schema["properties"]["mode"]["enum"]
 
 
+def test_chat_history_keeps_old_task_and_image_on_their_original_turn() -> None:
+    completions = FakeCompletions(
+        json.dumps(
+            {
+                "mode": "chat",
+                "consultant_message": "您是正在使用乐小读的公司顾问。",
+                "questions": [],
+                "parent_message": "",
+            },
+            ensure_ascii=False,
+        )
+    )
+    assistant = OpenAIConversationAssistant(
+        SimpleNamespace(chat=SimpleNamespace(completions=completions)),
+        "doubao-test",
+    )
+    context = ContextPackage(
+        (
+            _message("分析这张家长聊天截图", id="old-image", kind="image"),
+            _message("这是上一轮顾问建议。", role="assistant", id="old-answer"),
+            _message("我是谁", id="latest"),
+        ),
+        1,
+        ContextImage("image/png", b"OLD-SCREENSHOT"),
+    )
+
+    answer = assistant.respond(context, "latest")
+
+    assert answer == "您是正在使用乐小读的公司顾问。"
+    messages = completions.options["messages"]
+    assert [message["role"] for message in messages] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert isinstance(messages[1]["content"], list)
+    assert messages[1]["content"][1]["type"] == "image_url"
+    assert messages[-1] == {"role": "user", "content": "我是谁"}
+
+
 def test_doubao_chat_sends_screenshot_as_high_detail_image() -> None:
     completions = FakeCompletions()
     assistant = OpenAIConversationAssistant(
@@ -393,10 +440,9 @@ def test_doubao_selects_cloud_pdf_and_office_without_local_files_api() -> None:
     assert "doc-docx" in routing_prompt
     assert "课程介绍.docx" in routing_prompt
     content = responses.options["input"][0]["content"]
-    assert content[0]["type"] == "input_text"
-    assert "方舟知识库" in content[0]["text"]
-    assert "《课程说明.pdf》" in content[0]["text"]
-    assert "《课程介绍.docx》" in content[0]["text"]
+    assert "方舟知识库" in content
+    assert "《课程说明.pdf》" in content
+    assert "《课程介绍.docx》" in content
     assert "timeout" not in responses.options
     assert "课程说明.pdf" in answer
     assert "课程介绍.docx" in answer
@@ -540,7 +586,7 @@ def test_doubao_uses_knowledge_document_for_course_policy_facts() -> None:
 
     assert reader.documents == (document,)
     assert "家长想了解线上课程的请假和补课政策" in reader.query
-    evidence_prompt = responses.options["input"][0]["content"][0]["text"]
+    evidence_prompt = responses.options["input"][0]["content"]
     assert "《课程政策.docx》\n方舟解析的相关内容" in evidence_prompt
     consultant_text, parent_text = answer.split("可直接发给家长", 1)
     assert "《课程政策.docx》" in consultant_text
@@ -578,8 +624,22 @@ def test_doubao_routes_and_retrieves_for_the_latest_question() -> None:
     assert reader.query == "数学二年级课程大纲"
     routing_system = routing.options["messages"][0]["content"]
     assert "只根据最新一条用户消息" in routing_system
-    routing_prompt = routing.options["messages"][1]["content"]
-    assert "当前用户消息（本轮唯一回答目标）：\n数学二年级课程大纲" in routing_prompt
+    assert [message["role"] for message in routing.options["messages"]] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+    ]
+    routing_prompt = routing.options["messages"][-1]["content"]
+    assert routing_prompt.startswith("数学二年级课程大纲\n\n可选原文档")
+    assert [message["role"] for message in responses.options["input"]] == [
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert responses.options["input"][-1]["content"].startswith(
+        "数学二年级课程大纲\n\n方舟知识库"
+    )
 
 
 def test_no_link_requirement_persists_across_later_turns() -> None:
@@ -649,7 +709,7 @@ def test_doubao_knowledge_response_uses_same_consultant_answer_contract() -> Non
     assistant.respond(ContextPackage((), 1), "request-1")
 
     instructions = responses.options["instructions"]
-    prompt = responses.options["input"][0]["content"][0]["text"]
+    prompt = responses.options["input"][0]["content"]
     assert "正在使用应用并与您对话的人是公司顾问" in instructions
     assert "一至两个最关键的问题" in instructions
     assert "给顾问的建议" in instructions

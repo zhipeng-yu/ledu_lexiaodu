@@ -115,13 +115,9 @@ class OpenAIConversationAssistant:
         if not documents:
             return ()
         by_id = {document.doc_id: document for document in documents}
-        prompt = (
-            f"{_conversation_prompt(context)}\n\n"
-            "可选原文档（文档 ID\t文件名）：\n"
-            + "\n".join(
-                f"{document.doc_id}\t{document.name}" for document in documents
-            )
-        ).lstrip()
+        prompt = "可选原文档（文档 ID\t文件名）：\n" + "\n".join(
+            f"{document.doc_id}\t{document.name}" for document in documents
+        )
         response = self._client.chat.completions.create(
             model=self._model,
             messages=[
@@ -135,10 +131,7 @@ class OpenAIConversationAssistant:
                         '只返回 JSON：{"document_ids":["文档 ID"]}。'
                     ),
                 },
-                {
-                    "role": "user",
-                    "content": _chat_user_content(context, prompt),
-                },
+                *_chat_messages(context, suffix=prompt),
             ],
             response_format={"type": "json_object"},
             extra_body={"thinking": {"type": "disabled"}},
@@ -170,12 +163,7 @@ class OpenAIConversationAssistant:
             model=self._model,
             messages=[
                 {"role": "system", "content": _SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": _chat_user_content(
-                        context, _conversation_prompt(context)
-                    ),
-                },
+                *_chat_messages(context),
             ],
             response_format={
                 "type": "json_schema",
@@ -201,10 +189,9 @@ class OpenAIConversationAssistant:
             force_advice=_requires_business_system_verification(context)
         )
         prompt = (
-            f"{_conversation_prompt(context)}\n\n"
             "方舟知识库从本次所选原文档检索到：\n"
             f"{knowledge_evidence}"
-        ).lstrip()
+        )
         request = {
             "model": self._model,
             "instructions": _SYSTEM_PROMPT,
@@ -216,26 +203,8 @@ class OpenAIConversationAssistant:
                     "schema": schema,
                 }
             },
-            "input": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "input_text",
-                            "text": prompt,
-                        },
-                    ],
-                }
-            ],
+            "input": _response_messages(context, suffix=prompt),
         }
-        if context.image is not None:
-            request["input"][0]["content"].append(
-                {
-                    "type": "input_image",
-                    "image_url": _image_data_url(context.image),
-                    "detail": "high",
-                }
-            )
         if all(
             document.name.casefold().endswith((".docx", ".pptx", ".xlsx"))
             for document in documents
@@ -245,21 +214,66 @@ class OpenAIConversationAssistant:
         return response.output_text
 
 
-def _chat_user_content(
-    context: ContextPackage, text: str
+def _chat_content(
+    text: str, image: ContextImage | None
 ) -> str | list[dict[str, Any]]:
-    if context.image is None:
+    if image is None:
         return text
     return [
         {"type": "text", "text": text},
         {
             "type": "image_url",
             "image_url": {
-                "url": _image_data_url(context.image),
+                "url": _image_data_url(image),
                 "detail": "high",
             },
         },
     ]
+
+
+def _chat_messages(
+    context: ContextPackage, *, suffix: str = ""
+) -> list[dict[str, Any]]:
+    latest_user_id = next(
+        (message.id for message in reversed(context.messages) if message.role == "user"),
+        None,
+    )
+    image_message_id = next(
+        (message.id for message in reversed(context.messages) if message.kind == "image"),
+        None,
+    )
+    messages: list[dict[str, Any]] = []
+    for message in context.messages:
+        text = message.body
+        if message.id == latest_user_id and suffix:
+            text = f"{text}\n\n{suffix}" if text else suffix
+        image = context.image if message.id == image_message_id else None
+        messages.append(
+            {"role": message.role, "content": _chat_content(text, image)}
+        )
+    if not messages:
+        messages.append(
+            {"role": "user", "content": _chat_content(suffix, context.image)}
+        )
+    return messages
+
+
+def _response_messages(
+    context: ContextPackage, *, suffix: str
+) -> list[dict[str, Any]]:
+    messages = _chat_messages(context, suffix=suffix)
+    for message in messages:
+        content = message["content"]
+        if isinstance(content, list):
+            message["content"] = [
+                {"type": "input_text", "text": content[0]["text"]},
+                {
+                    "type": "input_image",
+                    "image_url": content[1]["image_url"]["url"],
+                    "detail": "high",
+                },
+            ]
+    return messages
 
 
 def _image_data_url(image: ContextImage) -> str:
@@ -275,17 +289,6 @@ def _latest_user_message(context: ContextPackage) -> str:
             if message.role == "user"
         ),
         "",
-    )
-
-
-def _conversation_prompt(context: ContextPackage) -> str:
-    conversation = context.render_for_model()
-    if not conversation:
-        return ""
-    return (
-        f"对话上下文：\n{conversation}\n\n"
-        "当前用户消息（本轮唯一回答目标）：\n"
-        f"{_latest_user_message(context)}"
     )
 
 
