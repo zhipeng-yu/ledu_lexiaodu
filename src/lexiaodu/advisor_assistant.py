@@ -44,7 +44,7 @@ class OpenAIConversationAssistant:
             selected = self._select_documents(context, documents)
             knowledge_evidence = (
                 self._knowledge_reader.retrieve(
-                    context.render_for_model(),
+                    _latest_user_message(context),
                     selected,
                 )
                 if selected and self._knowledge_reader is not None
@@ -98,6 +98,8 @@ class OpenAIConversationAssistant:
                     f"{content[:parent_heading].rstrip()}\n\n{source_note}\n\n"
                     f"{content[parent_heading:].lstrip()}"
                 )
+        if _links_forbidden(context):
+            content = _strip_links(content)
         return content
 
     def _available_documents(self) -> tuple[KnowledgeDocument, ...]:
@@ -113,30 +115,29 @@ class OpenAIConversationAssistant:
         if not documents:
             return ()
         by_id = {document.doc_id: document for document in documents}
+        prompt = (
+            f"{_conversation_prompt(context)}\n\n"
+            "可选原文档（文档 ID\t文件名）：\n"
+            + "\n".join(
+                f"{document.doc_id}\t{document.name}" for document in documents
+            )
+        ).lstrip()
         response = self._client.chat.completions.create(
             model=self._model,
             messages=[
                 {
                     "role": "system",
                     "content": (
-                        "你只负责选择回答当前顾问问题所需的公司原文档。"
+                        "你只负责选择回答最新一条用户消息所需的公司原文档。"
+                        "只根据最新一条用户消息判断；此前对话只用于理解指代，"
+                        "绝不能因此继续回答旧问题。"
                         "只能从给定文档 ID 中选择，最多三份；不需要文档就返回空数组。"
                         '只返回 JSON：{"document_ids":["文档 ID"]}。'
                     ),
                 },
                 {
                     "role": "user",
-                    "content": _chat_user_content(
-                        context,
-                        (
-                            f"当前会话：\n{context.render_for_model()}\n\n"
-                            "可选原文档（文档 ID\t文件名）：\n"
-                            + "\n".join(
-                                f"{document.doc_id}\t{document.name}"
-                                for document in documents
-                            )
-                        ),
-                    ),
+                    "content": _chat_user_content(context, prompt),
                 },
             ],
             response_format={"type": "json_object"},
@@ -172,7 +173,7 @@ class OpenAIConversationAssistant:
                 {
                     "role": "user",
                     "content": _chat_user_content(
-                        context, context.render_for_model()
+                        context, _conversation_prompt(context)
                     ),
                 },
             ],
@@ -196,12 +197,14 @@ class OpenAIConversationAssistant:
         *,
         knowledge_evidence: str | None,
     ) -> str:
-        schema = _advisor_response_schema(force_advice=True)
+        schema = _advisor_response_schema(
+            force_advice=_requires_business_system_verification(context)
+        )
         prompt = (
-            f"当前会话：\n{context.render_for_model()}\n\n"
+            f"{_conversation_prompt(context)}\n\n"
             "方舟知识库从本次所选原文档检索到：\n"
             f"{knowledge_evidence}"
-        )
+        ).lstrip()
         request = {
             "model": self._model,
             "instructions": _SYSTEM_PROMPT,
@@ -264,6 +267,68 @@ def _image_data_url(image: ContextImage) -> str:
     return f"data:{image.mime_type};base64,{data}"
 
 
+def _latest_user_message(context: ContextPackage) -> str:
+    return next(
+        (
+            message.body
+            for message in reversed(context.messages)
+            if message.role == "user"
+        ),
+        "",
+    )
+
+
+def _conversation_prompt(context: ContextPackage) -> str:
+    conversation = context.render_for_model()
+    if not conversation:
+        return ""
+    return (
+        f"对话上下文：\n{conversation}\n\n"
+        "当前用户消息（本轮唯一回答目标）：\n"
+        f"{_latest_user_message(context)}"
+    )
+
+
+def _links_forbidden(context: ContextPackage) -> bool:
+    forbidden = False
+    for message in context.messages:
+        if message.role != "user":
+            continue
+        text = re.sub(r"\s+", "", message.body.casefold())
+        if any(
+            phrase in text
+            for phrase in (
+                "不要发链接",
+                "不要链接",
+                "别发链接",
+                "只发文字",
+                "纯文字",
+            )
+        ):
+            forbidden = True
+        elif any(
+            phrase in text for phrase in ("可以发链接", "请发链接", "给我链接")
+        ):
+            forbidden = False
+    return forbidden
+
+
+def _strip_links(content: str) -> str:
+    content = re.sub(
+        r"\[([^\]]+)]\(\s*https?://[^)\s]+\s*\)",
+        r"\1",
+        content,
+        flags=re.IGNORECASE,
+    )
+    content = re.sub(
+        r"(?:https?://|www\.)[^\s<>\])）。，；！？]+",
+        "",
+        content,
+        flags=re.IGNORECASE,
+    )
+    return re.sub(r"[ \t]+([，。；！？])", r"\1", content).strip()
+
+
 def _render_advisor_response(content: str) -> str:
     try:
         payload = json.loads(content)
@@ -277,7 +342,7 @@ def _render_advisor_response(content: str) -> str:
     questions = payload.get("questions")
     parent_message = payload.get("parent_message")
     if (
-        mode not in {"clarify", "advice"}
+        mode not in {"chat", "clarify", "advice"}
         or not isinstance(consultant_message, str)
         or not consultant_message.strip()
         or not isinstance(questions, list)
@@ -288,6 +353,11 @@ def _render_advisor_response(content: str) -> str:
         raise AdvisorAssistantError("豆包顾问返回结构无效")
 
     consultant_message = consultant_message.strip()
+    if mode == "chat":
+        if questions or parent_message.strip():
+            raise AdvisorAssistantError("豆包顾问返回结构无效")
+        return consultant_message
+
     if mode == "clarify":
         if not questions or parent_message.strip():
             raise AdvisorAssistantError("豆包顾问返回结构无效")
@@ -330,7 +400,7 @@ def _include_business_system_verification(content: str) -> str:
 
 
 def _advisor_response_schema(*, force_advice: bool) -> dict[str, Any]:
-    modes = ["advice"] if force_advice else ["clarify", "advice"]
+    modes = ["advice"] if force_advice else ["chat", "clarify", "advice"]
     max_questions = 0 if force_advice else 2
     return {
         "type": "object",
@@ -366,7 +436,10 @@ def _parent_section_start(content: str) -> int | None:
 
 
 _SYSTEM_PROMPT = (
-    "你是乐小读，是面向公司顾问的沟通助手。"
+    "你是乐小读，是拥有公司知识的通用 AI 助手。"
+    "像普通 AI 一样自然交流，能够闲聊、回答一般问题和直接解释公司知识；"
+    "不要把所有消息都理解成家长沟通任务。"
+    "始终优先回答当前用户最新消息，不得继续回答已经结束的旧问题。"
     "正在使用应用并与您对话的人是公司顾问；家长是顾问需要沟通和服务的对象。"
     "始终直接向顾问回答，不要把顾问当作或称作家长，也不要假装直接询问家长。"
     "公司顾问即使被称为“顾问老师”，也只负责家长沟通，"
@@ -382,7 +455,8 @@ _SYSTEM_PROMPT = (
     "公司事实只能来自明确提供的公司原文档；当前上下文没有依据时，"
     "要说明待核实，不要编造，也不要用常识补全政策、课程信息或承诺。"
     "聊天案例只能影响表达方式，不得作为公司事实来源。"
-    "信息不足、缺少会影响建议正确性的关键情况时，向顾问说明还缺什么，"
+    "只有当前问题确实属于家长沟通且信息不足、缺少会影响建议正确性的关键情况时，"
+    "向顾问说明还缺什么，"
     "只向顾问提出一至两个最关键的问题；此时不要输出空泛的家长回复模板。"
     "信息充分、可以在不编造关键事实的前提下给出建议时，"
     "consultant_message 简述核心判断，并按需说明公司知识依据、来源文件名、"
@@ -390,11 +464,16 @@ _SYSTEM_PROMPT = (
     "来源文件名只能出现在“给顾问的建议”中；家长话术中不要混入内部分析、来源列表或操作说明。"
     "表达时先接住顾虑并确认理解，再用短句澄清，把孩子当前情况、方案匹配和下一步连起来；"
     "语气自然、有礼、不过度施压，不堆砌卖点，不作超出证据的保证。"
+    "用户明确提出的输出要求（例如不发链接、只发文字、简短回答）持续有效，"
+    "直到用户明确改变要求；要求不发链接时，不得把检索证据中的链接带入回复。"
     "引用公司事实时标明文件名，能够识别页码或章节时一并标明。"
     "课程名额、订单、付款和 App 显示等实时状态必须请顾问查询业务系统。"
     "涉及退款、投诉、法律、人身安全、健康、隐私或儿童保护时，不作确定承诺，提示人工核实。"
     "不要假装已经把消息发送给家长。"
-    "请严格按给定 JSON Schema 返回。信息不足时 mode 使用 clarify，"
+    "请严格按给定 JSON Schema 返回。普通聊天、一般问题或用户只想直接获得答案时，"
+    "mode 使用 chat，consultant_message 直接自然回答，questions 为空，parent_message 为空。"
+    "只有用户明确需要家长沟通建议或家长话术时，才使用 clarify 或 advice。"
+    "这类问题信息不足时 mode 使用 clarify，"
     "consultant_message 说明缺口，questions 放一至两个问顾问的问题，parent_message 为空。"
     "可以给建议时 mode 使用 advice，consultant_message 放顾问说明，questions 为空，"
     "parent_message 只放可直接发给家长的话术，各字段内不要重复界面标题。"

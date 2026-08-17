@@ -133,6 +133,20 @@ class FailingKnowledgeReader(FakeKnowledgeReader):
         )
 
 
+def _message(body: str, *, role: str = "user", id: str = "message") -> Message:
+    return Message(
+        id=id,
+        conversation_id="conversation",
+        role=role,
+        kind="text",
+        body=body,
+        request_id=id if role == "user" else None,
+        in_reply_to_request_id=None,
+        processing_status="processing",
+        created_at=datetime.now(UTC),
+    )
+
+
 def _chat_system_prompt() -> str:
     completions = FakeCompletions()
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
@@ -282,6 +296,33 @@ def test_doubao_chat_uses_strict_schema_and_renders_clarification() -> None:
     assert completions.options["messages"][1]["content"] == ""
 
 
+def test_doubao_can_chat_normally_without_advisor_template() -> None:
+    completions = FakeCompletions(
+        json.dumps(
+            {
+                "mode": "chat",
+                "consultant_message": "当然可以，我们可以像普通聊天一样交流。",
+                "questions": [],
+                "parent_message": "",
+            },
+            ensure_ascii=False,
+        )
+    )
+    assistant = OpenAIConversationAssistant(
+        SimpleNamespace(chat=SimpleNamespace(completions=completions)),
+        "doubao-test",
+    )
+
+    answer = assistant.respond(ContextPackage((), 1), "request-chat")
+
+    assert answer == "当然可以，我们可以像普通聊天一样交流。"
+    system = completions.options["messages"][0]["content"]
+    assert "通用 AI 助手" in system
+    assert "不要把所有消息都理解成家长沟通任务" in system
+    schema = completions.options["response_format"]["json_schema"]["schema"]
+    assert "chat" in schema["properties"]["mode"]["enum"]
+
+
 def test_doubao_chat_sends_screenshot_as_high_detail_image() -> None:
     completions = FakeCompletions()
     assistant = OpenAIConversationAssistant(
@@ -386,7 +427,7 @@ def test_doubao_knowledge_routing_and_response_send_the_screenshot() -> None:
     assert routing_content == [
         {
             "type": "text",
-            "text": "当前会话：\n\n\n可选原文档（文档 ID\t文件名）：\ndoc-pdf\t课程说明.pdf",
+            "text": "可选原文档（文档 ID\t文件名）：\ndoc-pdf\t课程说明.pdf",
         },
         {
             "type": "image_url",
@@ -399,7 +440,7 @@ def test_doubao_knowledge_routing_and_response_send_the_screenshot() -> None:
     content = responses.options["input"][0]["content"]
     assert len(content) == 2
     assert content[0]["type"] == "input_text"
-    assert "当前会话" in content[0]["text"]
+    assert "方舟知识库" in content[0]["text"]
     assert content[1] == {
         "type": "input_image",
         "image_url": "data:image/png;base64,TE9ORy1TQ1JFRU5TSE9U",
@@ -506,6 +547,80 @@ def test_doubao_uses_knowledge_document_for_course_policy_facts() -> None:
     assert "课程政策.docx" not in parent_text
 
 
+def test_doubao_routes_and_retrieves_for_the_latest_question() -> None:
+    document = KnowledgeDocument("doc-outline", "二年级数学课程大纲.docx")
+    reader = FakeKnowledgeReader((document,))
+    responses = FakeResponses()
+    routing = RoutingCompletions(("doc-outline",))
+    assistant = OpenAIConversationAssistant(
+        SimpleNamespace(
+            responses=responses,
+            chat=SimpleNamespace(completions=routing),
+        ),
+        "doubao-test",
+        knowledge_reader=reader,
+    )
+    context = ContextPackage(
+        (
+            _message("家长问我们和学而思的区别。", id="old-user"),
+            _message(
+                "这里是上一题的课程对比回答。",
+                role="assistant",
+                id="old-answer",
+            ),
+            _message("数学二年级课程大纲", id="latest-user"),
+        ),
+        1,
+    )
+
+    assistant.respond(context, "latest-request")
+
+    assert reader.query == "数学二年级课程大纲"
+    routing_system = routing.options["messages"][0]["content"]
+    assert "只根据最新一条用户消息" in routing_system
+    routing_prompt = routing.options["messages"][1]["content"]
+    assert "当前用户消息（本轮唯一回答目标）：\n数学二年级课程大纲" in routing_prompt
+
+
+def test_no_link_requirement_persists_across_later_turns() -> None:
+    document = KnowledgeDocument("doc-outline", "二年级数学课程大纲.docx")
+    reader = FakeKnowledgeReader((document,))
+    responses = FakeResponses(
+        json.dumps(
+            {
+                "mode": "advice",
+                "consultant_message": "课程大纲见 https://internal.example/outline 。",
+                "questions": [],
+                "parent_message": "文字版大纲可参考[课程页](https://example.com/course)。",
+            },
+            ensure_ascii=False,
+        )
+    )
+    assistant = OpenAIConversationAssistant(
+        SimpleNamespace(
+            responses=responses,
+            chat=SimpleNamespace(
+                completions=RoutingCompletions(("doc-outline",))
+            ),
+        ),
+        "doubao-test",
+        knowledge_reader=reader,
+    )
+    context = ContextPackage(
+        (
+            _message("后面都不要发链接，只发文字。", id="preference"),
+            _message("数学二年级课程大纲", id="latest"),
+        ),
+        1,
+    )
+
+    answer = assistant.respond(context, "latest-request")
+
+    assert "http" not in answer
+    assert "](" not in answer
+    assert "课程页" in answer
+
+
 def test_doubao_knowledge_response_uses_same_consultant_answer_contract() -> None:
     document = KnowledgeDocument("doc-docx", "课程介绍.docx")
     reader = FakeKnowledgeReader((document,))
@@ -547,10 +662,10 @@ def test_doubao_knowledge_response_uses_same_consultant_answer_contract() -> Non
     assert response_format["type"] == "json_schema"
     assert response_format["strict"] is True
     schema = response_format["schema"]
-    assert schema["properties"]["mode"]["enum"] == ["advice"]
-    assert schema["properties"]["questions"]["maxItems"] == 0
+    assert schema["properties"]["mode"]["enum"] == ["chat", "clarify", "advice"]
+    assert schema["properties"]["questions"]["maxItems"] == 2
     assert schema["properties"]["consultant_message"]["minLength"] == 1
-    assert schema["properties"]["parent_message"]["minLength"] == 1
+    assert schema["properties"]["parent_message"]["minLength"] == 0
 
 
 def test_doubao_realtime_status_forces_advice_with_business_system_verification() -> None:
