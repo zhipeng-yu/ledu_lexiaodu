@@ -14,6 +14,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QFrame,
     QFileDialog,
     QHBoxLayout,
@@ -28,6 +29,9 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from lexiaodu.runtime import diagnostic_text
+
 
 @dataclass(frozen=True, slots=True)
 class ChatConversationView:
@@ -163,7 +167,7 @@ class _TimelineTurn(QFrame):
             status = QLabel(
                 "生成未完成，可以从原问题重试"
                 if turn.status == "interrupted"
-                else "生成失败，可以重试"
+                else "生成失败，请检查网络后重试"
             )
             status.setObjectName("requestStatus")
             retry_row.addWidget(status)
@@ -410,6 +414,13 @@ class ChatMainWindow(QMainWindow):
         headings.addWidget(subheading)
         header_layout.addLayout(headings)
         header_layout.addStretch()
+        diagnostics = QPushButton("复制诊断信息")
+        diagnostics.setObjectName("copyDiagnostics")
+        diagnostics.setToolTip("报错后点击复制，不包含密钥和聊天正文")
+        diagnostics.clicked.connect(
+            lambda: QApplication.clipboard().setText(diagnostic_text())
+        )
+        header_layout.addWidget(diagnostics)
         layout.addWidget(header)
 
         self._timeline = QListWidget()

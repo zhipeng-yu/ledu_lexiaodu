@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from lexiaodu.runtime import user_data_dir
 
 
 class SettingsError(ValueError):
@@ -12,14 +14,16 @@ class SettingsError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class ChatSettings:
-    database_path: Path = Path("data/chat.sqlite3")
+    database_path: Path = field(
+        default_factory=lambda: user_data_dir() / "chat.sqlite3"
+    )
     context_character_budget: int = 18000
 
 
 @dataclass(frozen=True, slots=True)
 class AppSettings:
     app_name: str = "乐小读"
-    chat: ChatSettings = ChatSettings()
+    chat: ChatSettings = field(default_factory=ChatSettings)
 
 
 def _table(data: dict[str, Any], name: str) -> dict[str, Any]:
@@ -55,13 +59,17 @@ def load_settings(path: Path) -> AppSettings:
     if not isinstance(app_name, str) or not app_name.strip():
         raise SettingsError("app.name 必须是非空字符串")
 
-    chat_database_path = chat.get("database_path", "data/chat.sqlite3")
-    if not isinstance(chat_database_path, str) or not chat_database_path.strip():
-        raise SettingsError("chat.database_path must be a non-empty string")
+    chat_database_path = chat.get("database_path")
+    if chat_database_path is None:
+        database_path = user_data_dir() / "chat.sqlite3"
+    elif isinstance(chat_database_path, str) and chat_database_path.strip():
+        database_path = Path(chat_database_path)
+    else:
+        raise SettingsError("chat.database_path 必须是非空字符串")
     return AppSettings(
         app_name=app_name,
         chat=ChatSettings(
-            database_path=Path(chat_database_path),
+            database_path=database_path,
             context_character_budget=_integer(chat, "context_character_budget", 18000),
         ),
     )

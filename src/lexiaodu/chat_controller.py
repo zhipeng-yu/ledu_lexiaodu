@@ -17,6 +17,7 @@ from lexiaodu.chat_window import (
 )
 from lexiaodu.chat_context import ContextBuilder, ContextPackage
 from lexiaodu.chat_repository import ConversationRepository, Message
+from lexiaodu.runtime import record_error
 from lexiaodu.screenshot_store import ScreenshotCorrupt, ScreenshotStore
 
 
@@ -114,7 +115,8 @@ class ChatController(QObject):
             return
         try:
             self._screenshot_store.delete_conversation(conversation_id)
-        except (OSError, ScreenshotCorrupt, sqlite3.Error):
+        except (OSError, ScreenshotCorrupt, sqlite3.Error) as exc:
+            record_error("删除会话", exc)
             QMessageBox.warning(
                 self._window,
                 "删除失败",
@@ -215,6 +217,7 @@ class ChatController(QObject):
             )
             if not isinstance(exc, (OSError, ValueError, sqlite3.Error)):
                 raise
+            record_error("保存截图", exc)
             QMessageBox.warning(
                 self._window,
                 "截图发送失败",
@@ -282,7 +285,8 @@ class ChatController(QObject):
                 context,
                 request_id,
             )
-        except Exception:
+        except Exception as exc:
+            record_error("准备回复", exc)
             self._fail_request(conversation_id, request_id)
             return
         future.add_done_callback(
@@ -306,7 +310,8 @@ class ChatController(QObject):
                 body,
                 in_reply_to_request_id=request_id,
             )
-        except Exception:
+        except Exception as exc:
+            record_error("生成回复", exc)
             self._fail_request(conversation_id, request_id)
             return
         self._show_if_active(conversation_id)

@@ -2,5 +2,4 @@
 name = "乐小读"
 
 [chat]
-database_path = "data/chat.sqlite3"
 context_character_budget = 18000

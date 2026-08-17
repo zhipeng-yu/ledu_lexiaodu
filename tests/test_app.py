@@ -15,6 +15,7 @@ from lexiaodu.app import (
     _build_conversation_assistant_from_environment,
     _build_knowledge_reader_from_environment,
     _configure_application,
+    _load_runtime_environment,
     build_parser,
     build_chat_runtime,
 )
@@ -59,6 +60,24 @@ def test_default_parser_has_no_legacy_knowledge_or_ocr_actions() -> None:
 
     assert "knowledge" not in help_text
     assert "ocr" not in help_text
+
+
+def test_frozen_runtime_loads_only_bundled_environment_without_interpolation(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    runtime_env = tmp_path / "runtime.env"
+    runtime_env.write_text(
+        'ARK_API_KEY="secret-${SHOULD_NOT_EXPAND}"\nARK_MODEL="model"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    monkeypatch.setattr("lexiaodu.app.sys.frozen", True, raising=False)
+    monkeypatch.setattr("lexiaodu.app.resource_path", lambda *_parts: runtime_env)
+
+    _load_runtime_environment()
+
+    assert os.environ["ARK_API_KEY"] == "secret-${SHOULD_NOT_EXPAND}"
 
 
 def test_configure_application_installs_default_font_increase() -> None:

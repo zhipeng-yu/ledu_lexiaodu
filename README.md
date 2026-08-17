@@ -40,7 +40,13 @@
 
 截图不支持 OCR、粘贴、单条消息多图、本地切片、TOS、方舟 Files API 或图片知识库上传。
 
-## 启动
+## Windows 安装版
+
+公司内部安装包已经预配置运行所需的豆包和方舟知识库参数。顾问按默认步骤安装后，从桌面或开始菜单双击“乐小读”即可使用，不需要安装 Python、打开命令行或填写配置。
+
+每台电脑的聊天、DPAPI 密钥、截图和日志保存在当前 Windows 用户的 `%LOCALAPPDATA%\Lexiaodu`。覆盖安装、卸载和重装不会主动删除这个目录。
+
+## 源码启动
 
 当前电脑在项目根目录执行：
 
@@ -118,9 +124,11 @@ LEXIAODU_GENERATOR=simulated
 
 ## 数据与隐私
 
-- 聊天数据库：`data/chat.sqlite3`
-- 本地加密密钥：`data/chat.key`
-- 聊天截图：`data/chat-images/`；原图按会话加密保存，删除会话时一并删除。
+- 用户数据目录：`%LOCALAPPDATA%\Lexiaodu`
+- 聊天数据库：`%LOCALAPPDATA%\Lexiaodu\chat.sqlite3`
+- 本地加密密钥：`%LOCALAPPDATA%\Lexiaodu\chat.key`
+- 聊天截图：`%LOCALAPPDATA%\Lexiaodu\chat-images\`；原图按会话加密保存，删除会话时一并删除。
+- 脱敏日志：`%LOCALAPPDATA%\Lexiaodu\logs\lexiaodu.log`
 - 公司原文档：保存在管理员确认的独立备份中，需要更新时直接本地上传方舟知识库。
 - 项目内 `company_documents/` 已删除且不参与运行；应用不会重新创建该目录。
 - TOS 桶由管理员独立处理，不属于应用的数据路径。
@@ -129,7 +137,7 @@ LEXIAODU_GENERATOR=simulated
 
 长截图使用 `high` 细节模式，不在本地切片。测试截图只可使用合成或脱敏内容，禁止使用真实家长数据。
 
-不要删除 `data/chat.key`，否则既有加密聊天记录将无法读取。
+不要删除 `%LOCALAPPDATA%\Lexiaodu\chat.key`，否则既有加密聊天记录将无法读取。
 
 ## 开发环境
 
@@ -144,6 +152,17 @@ LEXIAODU_GENERATOR=simulated
 ```powershell
 .\.venv\python.exe -m pytest -q
 ```
+
+## 构建 Windows 安装包
+
+构建机需要 Python 3.11、项目本地 `.venv` 和 NSIS 3。真实凭证只保存在 Git 忽略的 `.env`；构建脚本只筛选运行必需的 10 个配置项，不携带完整 `.env` 或 TOS 配置。
+
+```powershell
+.\.venv\python.exe -m pip install -e ".[dev,build]"
+.\.venv\python.exe tools\build_windows_release.py
+```
+
+如 `makensis.exe` 不在常见安装目录，可用 `MAKENSIS_PATH` 指定。最终安装包和单页 `使用说明.pdf` 输出到 Git 忽略的 `release\`；安装包只能通过公司内部私密渠道分发。
 
 ## 尚未完成
 

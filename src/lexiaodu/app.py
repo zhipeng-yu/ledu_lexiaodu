@@ -10,7 +10,7 @@ from typing import Sequence
 
 from dotenv import load_dotenv
 from openai import OpenAI
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 from volcengine.viking_knowledgebase import VikingKnowledgeBaseService
 
 from lexiaodu.advisor_assistant import OpenAIConversationAssistant
@@ -22,6 +22,12 @@ from lexiaodu.config import AppSettings, SettingsError, load_settings
 from lexiaodu.font_scaling import ApplicationFontScaler
 from lexiaodu.local_crypto import DataCipher
 from lexiaodu.office_documents import ArkKnowledgeDocumentReader
+from lexiaodu.runtime import (
+    configure_diagnostics,
+    record_error,
+    resource_path,
+    user_data_dir,
+)
 from lexiaodu.screenshot_store import ScreenshotStore
 
 
@@ -48,7 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config",
         type=Path,
-        default=Path("config/app.toml"),
+        default=resource_path("config", "app.toml"),
         help="TOML 配置文件路径",
     )
     return parser
@@ -149,6 +155,36 @@ def _build_conversation_assistant_from_environment() -> ConversationAssistant:
     )
 
 
+def _load_runtime_environment() -> None:
+    if getattr(sys, "frozen", False):
+        load_dotenv(
+            resource_path("runtime.env"),
+            override=False,
+            interpolate=False,
+        )
+    else:
+        load_dotenv()
+
+
+def _show_startup_error(error: BaseException) -> None:
+    detail = record_error("启动", error)
+    box = QMessageBox()
+    box.setIcon(QMessageBox.Icon.Critical)
+    box.setWindowTitle("乐小读启动失败")
+    if isinstance(error, (SettingsError, ValueError)):
+        box.setText("乐小读缺少必要配置，无法启动。请联系管理员重新安装。")
+    else:
+        box.setText("乐小读无法启动。请联系管理员，并复制诊断信息。")
+    copy_button = box.addButton(
+        "复制诊断信息",
+        QMessageBox.ButtonRole.ActionRole,
+    )
+    box.addButton("关闭", QMessageBox.ButtonRole.RejectRole)
+    box.exec()
+    if box.clickedButton() is copy_button:
+        QApplication.clipboard().setText(detail)
+
+
 def build_chat_runtime(
     settings: AppSettings,
     assistant: ConversationAssistant,
@@ -198,20 +234,17 @@ def build_chat_runtime(
 
 def run(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    _load_runtime_environment()
+    configure_diagnostics(user_data_dir() / "logs")
+    application = QApplication([sys.argv[0]])
     try:
         settings = load_settings(args.config)
-    except SettingsError as exc:
-        print(f"配置错误: {exc}", file=sys.stderr)
+        font_scaler = _configure_application(application, settings.app_name)
+        assistant = _build_conversation_assistant_from_environment()
+        runtime = build_chat_runtime(settings, assistant)
+    except Exception as exc:
+        _show_startup_error(exc)
         return 2
-
-    load_dotenv()
-    application = QApplication([sys.argv[0]])
-    font_scaler = _configure_application(application, settings.app_name)
-
-    runtime = build_chat_runtime(
-        settings,
-        _build_conversation_assistant_from_environment(),
-    )
 
     try:
         exit_code = application.exec()

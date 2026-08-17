@@ -9,6 +9,7 @@ __pycache__/
 htmlcov/
 build/
 dist/
+release/
 *.egg-info/
 
 # Local settings and secrets

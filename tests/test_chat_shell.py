@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from lexiaodu.chat_window import ChatConversationView, ChatMainWindow, ChatTurnView
+from lexiaodu.runtime import configure_diagnostics, record_error
 
 
 def _application() -> QApplication:
@@ -32,6 +33,7 @@ def test_window_uses_lexiaodu_brand_and_only_active_chat_actions() -> None:
     assert window.findChild(QListWidget, "messageTimeline") is not None
     assert window.findChild(QPlainTextEdit, "chatComposer") is not None
     assert window.findChild(QPushButton, "sendMessage") is not None
+    assert window.findChild(QPushButton, "copyDiagnostics") is not None
     for removed_name in (
         "captureScreenshot",
         "pasteScreenshot",
@@ -39,6 +41,22 @@ def test_window_uses_lexiaodu_brand_and_only_active_chat_actions() -> None:
         "openContextDrawer",
     ):
         assert window.findChild(QPushButton, removed_name) is None
+    window.close()
+
+
+def test_copy_diagnostics_omits_error_message_and_chat_content(tmp_path) -> None:
+    application = _application()
+    configure_diagnostics(tmp_path / "logs")
+    record_error("生成回复", RuntimeError("ARK_API_KEY=secret 家长正文"))
+    window = ChatMainWindow()
+
+    window.findChild(QPushButton, "copyDiagnostics").click()
+
+    copied = application.clipboard().text()
+    assert "错误类型：RuntimeError" in copied
+    assert "secret" not in copied
+    assert "家长正文" not in copied
+    assert "chat.sqlite3" not in copied
     window.close()
 
 
